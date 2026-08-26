@@ -465,6 +465,27 @@ async def _lifespan(app: "FastAPI"):
     # sweeping stale sessions on schedule, independent of list requests.
     auto_archive_task = asyncio.create_task(_auto_archive_ticker_loop())
 
+    from hermes_cli.session_event_hub import SessionEventHub, set_session_event_hub
+
+    async def _session_revision_for_hub(profile_key: Optional[str], session_id: str) -> int:
+        def _read() -> int:
+            db = _open_session_db_for_profile(profile_key, read_only=True)
+            try:
+                sid = db.resolve_session_id(session_id)
+                if not sid:
+                    return 0
+                sid = db.resolve_resume_session_id(sid)
+                return db.session_message_revision(sid)
+            finally:
+                db.close()
+
+        return await asyncio.to_thread(_read)
+
+    session_event_hub = SessionEventHub(revision_reader=_session_revision_for_hub)
+    set_session_event_hub(session_event_hub)
+    app.state.session_event_hub = session_event_hub
+    await session_event_hub.start()
+
     try:
         yield
     finally:
@@ -473,6 +494,8 @@ async def _lifespan(app: "FastAPI"):
         pty_reaper_task.cancel()
         selftest_task.cancel()
         auto_archive_task.cancel()
+        await session_event_hub.stop()
+        set_session_event_hub(None)
         await PTY_REGISTRY.close_all()
         if os.getenv("HERMES_DESKTOP") == "1":
             _terminate_desktop_managed_gateway()

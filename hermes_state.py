@@ -10991,6 +10991,28 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         return row[0] if row else None
 
+    def session_message_revision(
+        self, session_id: str, *, include_compacted: bool = False
+    ) -> int:
+        """Latest message row id for a session (revision watermark for delta sync).
+
+        Returns ``0`` when the session has no matching rows. Uses the same
+        active/compacted visibility rules as :meth:`get_messages` defaults.
+        """
+        if not session_id:
+            return 0
+        if include_compacted:
+            active_clause = " AND (active = 1 OR compacted = 1)"
+        else:
+            active_clause = " AND active = 1"
+        with self._read_ctx() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?"
+                + active_clause,
+                (session_id,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]]) -> tuple[int, int]:
         """Insert *messages* as fresh active rows for *session_id*.
 

@@ -606,11 +606,18 @@ async def get_session_messages(
     offset: int = Query(0, ge=0),
     order: Optional[str] = Query(None),
     include_compacted: bool = Query(False),
+    after_id: Optional[int] = Query(None, ge=0),
+    if_revision: Optional[int] = Query(None, ge=0),
 ):
     if order not in (None, "oldest", "latest"):
         raise HTTPException(
             status_code=400,
             detail="order must be one of: oldest, latest",
+        )
+    if after_id is not None and (offset or order in ("latest",) or include_compacted):
+        raise HTTPException(
+            status_code=400,
+            detail="after_id is incompatible with offset, order=latest, and include_compacted",
         )
 
     def _read():
@@ -620,6 +627,21 @@ async def get_session_messages(
             if not sid:
                 return None
             sid = db.resolve_resume_session_id(sid)
+            revision = db.session_message_revision(
+                sid, include_compacted=include_compacted
+            )
+            if if_revision is not None and if_revision == revision:
+                return sid, revision, 0, [], 0, False, "unchanged"
+            if after_id is not None:
+                _limit = min(limit if limit is not None else 500, 500)
+                messages = db.get_messages(
+                    sid,
+                    limit=_limit,
+                    after_id=after_id,
+                    include_compacted=include_compacted,
+                )
+                has_more = len(messages) >= _limit
+                return sid, revision, _limit, messages, after_id, has_more, "delta"
             # Always page this endpoint. An omitted limit used to load an
             # entire transcript, which can be hundreds of thousands of rows
             # for a runaway session and exhaust the dashboard process. Keep
@@ -628,12 +650,15 @@ async def get_session_messages(
             default_page = limit is None
             latest_page = order == "latest" or (order is None and default_page)
             _limit = 500 if default_page else min(limit, 500)
-            return sid, _limit, db.get_messages(
+            messages = db.get_messages(
                 sid,
                 limit=_limit,
                 offset=offset,
                 latest=latest_page,
                 include_compacted=include_compacted,
+            )
+            return sid, revision, _limit, messages, offset, False, (
+                "latest" if latest_page else "oldest"
             )
         finally:
             db.close()
@@ -641,7 +666,7 @@ async def get_session_messages(
     result = await asyncio.to_thread(_read)
     if result is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    sid, _limit, messages = result
+    sid, revision, _limit, messages, page_anchor, has_more, page_mode = result
     from agent.compaction_display import project_compaction_message_for_display
     from agent.context_compressor import is_compaction_summary_message
 
@@ -662,16 +687,109 @@ async def get_session_messages(
             projected["display_content"] = display_view.get("content")
             projected.pop("display_kind", None)
         projected_messages.append(projected)
-    return {
-        "session_id": sid,
-        "messages": projected_messages,
-        "pagination": {
-            "limit": _limit,
-            "offset": offset,
-            "order": order or ("latest" if limit is None else "oldest"),
-            "returned": len(projected_messages),
-        },
+
+    pagination: Dict[str, Any] = {
+        "limit": _limit,
+        "returned": len(projected_messages),
     }
+    if after_id is not None:
+        pagination["after_id"] = page_anchor
+        pagination["order"] = "oldest"
+        pagination["has_more"] = has_more
+    else:
+        pagination["offset"] = page_anchor
+        pagination["order"] = page_mode if page_mode != "unchanged" else "latest"
+
+    body: Dict[str, Any] = {
+        "session_id": sid,
+        "revision": revision,
+        "latest_message_id": revision,
+        "messages": projected_messages,
+        "pagination": pagination,
+    }
+    if page_mode == "unchanged":
+        body["unchanged"] = True
+    return body
+
+
+@manage_router.get("/api/sessions/{session_id}/events")
+async def session_events_stream(
+    session_id: str,
+    profile: Optional[str] = None,
+    after_id: int = Query(0, ge=0),
+):
+    """SSE feed for live session transcript updates (mobile mirror / multi-client).
+
+    Clients reconnect with ``after_id`` set to their last seen message row id,
+    then call ``GET .../messages?after_id=`` to fetch any rows missed while
+    disconnected. Events are coalesced; duplicate delivery is avoided by
+    keyset-fetching only rows with ``id > after_id``.
+    """
+    from hermes_cli.session_event_hub import get_session_event_hub
+
+    def _resolve():
+        db = _open_session_db_for_profile(profile, read_only=True)
+        try:
+            sid = db.resolve_session_id(session_id)
+            if not sid:
+                return None
+            sid = db.resolve_resume_session_id(sid)
+            revision = db.session_message_revision(sid)
+            return sid, revision
+        finally:
+            db.close()
+
+    resolved = await asyncio.to_thread(_resolve)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    sid, revision = resolved
+
+    hub = get_session_event_hub()
+    if hub is None:
+
+        async def _degraded():
+            hello = {
+                "type": "hello",
+                "session_id": sid,
+                "revision": revision,
+                "latest_message_id": revision,
+                "after_id": after_id,
+                "degraded": True,
+            }
+            yield f"data: {json.dumps(hello)}\n\n"
+            while True:
+                await asyncio.sleep(25.0)
+                yield f"data: {json.dumps({'type': 'ping', 'ts': time.time()})}\n\n"
+
+        return StreamingResponse(
+            _degraded(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    async def _generate():
+        async for payload in hub.stream_events(
+            profile,
+            sid,
+            after_id=after_id,
+            initial_revision=revision,
+        ):
+            if payload.startswith('{"type": "error"'):
+                yield f"data: {payload}\n\n"
+                return
+            yield f"data: {payload}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @manage_router.delete("/api/sessions/{session_id}")
