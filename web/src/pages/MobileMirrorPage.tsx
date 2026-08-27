@@ -4,7 +4,6 @@ import { AlertCircle, Archive, ArrowLeft, Bot, ChevronRight, RefreshCw, Search, 
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
-import { AuthWidget } from "@/components/AuthWidget";
 import { Markdown } from "@/components/Markdown";
 import {
   AgentDeliveryNotice,
@@ -12,7 +11,7 @@ import {
 } from "@/components/mobile/AgentDeliveryNotice";
 import { AgentActivityNotice } from "@/components/mobile/AgentActivityNotice";
 import { MobileBotRow } from "@/components/mobile/MobileBotRow";
-import { ProfileSwitcher } from "@/components/ProfileSwitcher";
+import { MobileHubFooter } from "@/components/mobile/MobileHubFooter";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { useMobileKeyboardInset } from "@/hooks/useMobileKeyboardInset";
 import {
@@ -30,6 +29,14 @@ import {
   type MobileBotRow as MobileBot,
 } from "@/lib/mobile-bot-roster";
 import { renderMobileSessionMessages } from "@/lib/mobile-agent-delivery-render";
+import {
+  MOBILE_CHAT_EMPTY_TEXT,
+  MOBILE_CHAT_LOAD_TIMEOUT_MS,
+  MOBILE_CHAT_LOAD_TIMEOUT_TEXT,
+  shouldShowChatEmptyState,
+  shouldShowChatLoadFailure,
+  shouldShowChatLoadingSpinner,
+} from "@/lib/mobile-mirror-chat-state";
 import { GatewayClient } from "@/lib/gatewayClient";
 import {
   latestMessageId,
@@ -41,6 +48,7 @@ import {
   type SessionStreamEvent,
 } from "@/lib/mobile-session-sync";
 import { cn, timeAgo } from "@/lib/utils";
+import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
 
 const STREAM_RETRY_BASE_MS = 1_000;
 const STREAM_RETRY_MAX_MS = 12_000;
@@ -194,6 +202,7 @@ export default function MobileMirrorPage() {
   } = useMobileBotRoster(gateway);
   const { busyBots, activityLabels } = useMobileHubActivity(gateway);
   const keyboardInset = useMobileKeyboardInset();
+  const isMobileLayout = useBelowBreakpoint(1024);
 
   const selectedSessionRef = useRef(selectedSessionId);
   const selectedBotRef = useRef(selectedBotName);
@@ -246,6 +255,20 @@ export default function MobileMirrorPage() {
   }, [hubBots, hubQuery]);
 
   const inChat = Boolean(selectedSessionId);
+  const showChatLoadingSpinner = shouldShowChatLoadingSpinner({
+    messagesLoading,
+    messageCount: messages.length,
+    chatLoadFailed,
+  });
+  const showChatEmptyState = shouldShowChatEmptyState({
+    messagesLoading,
+    chatLoadFailed,
+    messageCount: messages.length,
+  });
+  const showChatLoadFailure = shouldShowChatLoadFailure({
+    chatLoadFailed,
+    messageCount: messages.length,
+  });
 
   const statusText = useMemo(() => {
     if (!selectedSessionId) return "Pick an agent";
@@ -265,6 +288,20 @@ export default function MobileMirrorPage() {
       shouldShowThinkingIndicator(messages, awaitingReply || gatewayBusy, streamStatus === "live"),
     [awaitingReply, chatLoadFailed, gatewayBusy, messages, streamStatus],
   );
+
+  useEffect(() => {
+    if (!selectedSessionId || !messagesLoading) return;
+    const timer = window.setTimeout(() => {
+      setMessagesLoading((current) => {
+        if (!current) return current;
+        setChatLoadFailed(true);
+        setStreamNote(MOBILE_CHAT_LOAD_TIMEOUT_TEXT);
+        setStreamStatus("error");
+        return false;
+      });
+    }, MOBILE_CHAT_LOAD_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [messagesLoading, selectedSessionId]);
 
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
@@ -698,10 +735,7 @@ export default function MobileMirrorPage() {
           ) : null}
         </div>
 
-        <footer className="shrink-0 space-y-2 border-t border-current/10 px-4 py-3">
-          <ProfileSwitcher />
-          <AuthWidget />
-        </footer>
+        <MobileHubFooter isMobileLayout={isMobileLayout} />
       </aside>
 
       <main className={cn("flex min-h-0 min-w-0 flex-1 flex-col", !inChat && "hidden lg:flex")}>
@@ -729,14 +763,14 @@ export default function MobileMirrorPage() {
             </header>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-              {messagesLoading && messages.length === 0 && !chatLoadFailed ? (
+              {showChatLoadingSpinner ? (
                 <div className="flex h-full items-center justify-center gap-2 text-sm text-text-tertiary">
                   <Spinner /> Loading messages…
                 </div>
-              ) : chatLoadFailed && messages.length === 0 ? (
+              ) : showChatLoadFailure ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
                   <AlertCircle className="h-8 w-8 text-destructive" />
-                  <p className="text-sm text-destructive">{streamNote}</p>
+                  <p className="text-sm text-destructive">{streamNote ?? MOBILE_CHAT_LOAD_TIMEOUT_TEXT}</p>
                   <Button
                     outlined
                     size="sm"
@@ -749,6 +783,11 @@ export default function MobileMirrorPage() {
                 </div>
               ) : (
                 <div className="flex flex-col gap-2 pb-4">
+                  {showChatEmptyState ? (
+                    <div className="flex flex-1 items-center justify-center px-6 py-10 text-center text-sm text-text-tertiary">
+                      {MOBILE_CHAT_EMPTY_TEXT}
+                    </div>
+                  ) : null}
                   {renderedMessages.map((item) => {
                     if (item.kind === "agent-receive") {
                       return (

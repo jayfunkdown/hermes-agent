@@ -30,6 +30,8 @@ import { LogOut } from "lucide-react";
 
 interface AuthWidgetProps {
   className?: string;
+  /** Single-line mobile footer copy without the desktop sidebar chrome. */
+  compact?: boolean;
 }
 
 /** Truncate ``user_id`` to fit a small UI without revealing the full
@@ -40,7 +42,7 @@ function truncateUserId(id: string): string {
   return `${id.slice(0, 14)}…`;
 }
 
-export function AuthWidget({ className }: AuthWidgetProps) {
+export function AuthWidget({ className, compact = false }: AuthWidgetProps) {
   const [me, setMe] = useState<AuthMeResponse | null>(null);
   const [hidden, setHidden] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,6 +123,36 @@ export function AuthWidget({ className }: AuthWidgetProps) {
   // populates user_id; the fallthroughs are forward-compat for a future
   // Portal that adds a userinfo endpoint (OQ-C1 in the plan).
   const label = me.display_name || me.email || truncateUserId(me.user_id);
+
+  if (compact) {
+    return (
+      <div
+        className={cn(
+          "flex shrink-0 items-center justify-between gap-2 text-[0.7rem] leading-5 text-text-tertiary",
+          className,
+        )}
+        role="status"
+        aria-label={`Logged in as ${label}`}
+      >
+        <span className="min-w-0 truncate">
+          Logged in as <span className="text-foreground/90">{label}</span>
+        </span>
+        <button
+          type="button"
+          onClick={handleLogout}
+          className={cn(
+            "shrink-0 rounded p-1.5 text-muted-foreground/70",
+            "transition-colors hover:bg-current/10 hover:text-foreground",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current/40",
+          )}
+          aria-label="Log out"
+          title="Log out"
+        >
+          <LogOut className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div
