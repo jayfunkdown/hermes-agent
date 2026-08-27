@@ -47,6 +47,7 @@ import {
   Settings,
   Shield,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Star,
   Terminal,
@@ -185,6 +186,11 @@ function ChatRouteSink() {
 }
 
 const BUILTIN_NAV_REST: NavItem[] = [
+  {
+    path: "/mobile",
+    label: "Agent Hub",
+    icon: Smartphone,
+  },
   {
     path: "/sessions",
     labelKey: "sessions",

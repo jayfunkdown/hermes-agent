@@ -89,6 +89,75 @@ export function sessionInitials(session: SessionInfo | null | undefined): string
   return label.slice(0, 2).toUpperCase() || "AG";
 }
 
+export const HUB_SESSION_POLL_MS = 30_000;
+export const HUB_PREVIEW_MAX_LEN = 120;
+
+export function previewFromMessages(messages: SessionMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || message.display_kind === "hidden") continue;
+    const text = message.content?.trim();
+    if (!text) continue;
+    if (text.length <= HUB_PREVIEW_MAX_LEN) return text;
+    return `${text.slice(0, HUB_PREVIEW_MAX_LEN).trim()}…`;
+  }
+  return "";
+}
+
+export function countPersistedMessages(messages: SessionMessage[]): number {
+  return messages.reduce(
+    (count, message) => (getMessageId(message) === null ? count : count + 1),
+    0,
+  );
+}
+
+export function bumpSessionInList(
+  sessions: SessionInfo[],
+  sessionId: string,
+  messages?: SessionMessage[],
+): SessionInfo[] {
+  const now = Math.floor(Date.now() / 1000);
+  const preview = messages ? previewFromMessages(messages) : "";
+  const messageCount = messages ? countPersistedMessages(messages) : 0;
+  let touched = false;
+  const next = sessions.map((session) => {
+    if (session.id !== sessionId) return session;
+    touched = true;
+    return {
+      ...session,
+      last_active: now,
+      is_active: true,
+      ...(preview ? { preview } : {}),
+      ...(messageCount > 0
+        ? { message_count: Math.max(session.message_count, messageCount) }
+        : {}),
+    };
+  });
+  if (!touched) return sessions;
+  return [...next].sort((left, right) => right.last_active - left.last_active);
+}
+
+export function lastVisibleMessageRole(
+  messages: SessionMessage[],
+): SessionMessage["role"] | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || message.display_kind === "hidden") continue;
+    return message.role;
+  }
+  return null;
+}
+
+export function shouldShowThinkingIndicator(
+  messages: SessionMessage[],
+  awaitingReply: boolean,
+  streamLive: boolean,
+): boolean {
+  if (!streamLive && !awaitingReply) return false;
+  if (awaitingReply) return true;
+  return lastVisibleMessageRole(messages) === "user";
+}
+
 export function shouldCollapseMessage(message: SessionMessage): boolean {
   if (message.role === "tool") return true;
   if (message.tool_calls && message.tool_calls.length > 0) return true;

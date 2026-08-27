@@ -36,6 +36,11 @@ clients receive results through the Phase 1 session store/event stream.
 
 ## Phase 2 features retained
 
+- WhatsApp-style agent hub: searchable session list, full-screen chat on mobile,
+  split hub + chat on wide screens, and chat bubbles aligned by role.
+- Hub list stays fresh via local preview bumps on message sync, 30s polling,
+  and visibility-triggered refresh/catch-up.
+- Soft-keyboard inset keeps the composer visible on mobile.
 - Active-profile session list and responsive Hermes dashboard styling.
 - Delta catch-up via `after_id`, SSE reconnect, and ID deduplication.
 - Collapsible tool output and installable manifest/service worker.

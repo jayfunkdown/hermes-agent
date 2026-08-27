@@ -8,8 +8,11 @@ import { AuthWidget } from "@/components/AuthWidget";
 import { Markdown } from "@/components/Markdown";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { useProfileScope } from "@/contexts/useProfileScope";
+import { useMobileKeyboardInset } from "@/hooks/useMobileKeyboardInset";
 import { api, authedFetch, type SessionInfo, type SessionMessage } from "@/lib/api";
 import {
+  bumpSessionInList,
+  HUB_SESSION_POLL_MS,
   latestMessageId,
   mergeSessionMessages,
   parseSessionStreamEvent,
@@ -19,6 +22,7 @@ import {
   sessionPreviewText,
   sessionStreamCursor,
   shouldCollapseMessage,
+  shouldShowThinkingIndicator,
   type SessionStreamEvent,
 } from "@/lib/mobile-session-sync";
 import { cn, timeAgo } from "@/lib/utils";
@@ -172,6 +176,20 @@ function ToolCallBlock({
   );
 }
 
+function ThinkingBubble() {
+  return (
+    <article className="flex w-full justify-start">
+      <div className="rounded-2xl rounded-bl-md border border-border bg-muted/35 px-4 py-3 text-sm text-text-tertiary">
+        <span className="inline-flex items-center gap-1" aria-label="Agent is thinking">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:120ms]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:240ms]" />
+        </span>
+      </div>
+    </article>
+  );
+}
+
 function ChatBubble({ message }: { message: SessionMessage }) {
   if (message.display_kind === "hidden") {
     return null;
@@ -268,6 +286,9 @@ export default function MobileMirrorPage() {
   const [streamNote, setStreamNote] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sendBusy, setSendBusy] = useState(false);
+  const [awaitingReply, setAwaitingReply] = useState(false);
+
+  const keyboardInset = useMobileKeyboardInset();
 
   const selectedSessionRef = useRef(selectedSessionId);
   const resolvedSessionIdRef = useRef("");
@@ -311,6 +332,11 @@ export default function MobileMirrorPage() {
     return "Ready";
   }, [messagesLoading, selectedSessionId, streamNote, streamStatus]);
 
+  const showThinking = useMemo(
+    () => shouldShowThinkingIndicator(messages, awaitingReply, streamStatus === "live"),
+    [awaitingReply, messages, streamStatus],
+  );
+
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
   }, [selectedSessionId]);
@@ -318,7 +344,7 @@ export default function MobileMirrorPage() {
   useEffect(() => {
     if (!inChat || messagesLoading) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [inChat, messages, messagesLoading]);
+  }, [awaitingReply, inChat, messages, messagesLoading, showThinking]);
 
   const applyMessageDelta = useCallback(
     async (sessionId: string, afterId: number, profileName: string) => {
@@ -329,40 +355,63 @@ export default function MobileMirrorPage() {
         if (revision > cursorRef.current) {
           cursorRef.current = revision;
         }
+        setSessions((prev) => bumpSessionInList(prev, sessionId));
         return;
       }
       setMessages((prev) => {
         const merged = mergeSessionMessages(prev, incoming);
         cursorRef.current = latestMessageId(merged);
+        setSessions((sessionsPrev) => bumpSessionInList(sessionsPrev, sessionId, merged));
+        if (incoming.some((message) => message.role === "assistant")) {
+          setAwaitingReply(false);
+        }
         return merged;
       });
     },
     [],
   );
 
-  useEffect(() => {
-    let cancelled = false;
+  const reloadSessions = useCallback(() => {
     setSessionsLoading(true);
     setSessionsError(null);
-
-    api
+    return api
       .getSessions(SESSION_LIMIT, 0, profile || "", "recent")
       .then((res) => {
-        if (cancelled) return;
         setSessions(res.sessions);
       })
       .catch((error: Error) => {
-        if (cancelled) return;
         setSessionsError(error.message || "failed to load sessions");
       })
       .finally(() => {
-        if (!cancelled) setSessionsLoading(false);
+        setSessionsLoading(false);
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, [profile]);
+
+  useEffect(() => {
+    void reloadSessions();
+  }, [reloadSessions]);
+
+  useEffect(() => {
+    if (document.visibilityState !== "visible") return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void reloadSessions();
+      }
+    }, HUB_SESSION_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [reloadSessions]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      void reloadSessions();
+      const sessionId = resolvedSessionIdRef.current || selectedSessionRef.current;
+      if (!sessionId) return;
+      void applyMessageDelta(sessionId, cursorRef.current, profile || "");
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [applyMessageDelta, profile, reloadSessions]);
 
   useEffect(() => {
     if (!sessionParam || sessionParam === selectedSessionId) return;
@@ -379,6 +428,7 @@ export default function MobileMirrorPage() {
       setMessagesLoading(false);
       setStreamStatus("idle");
       setStreamNote(null);
+      setAwaitingReply(false);
       cursorRef.current = 0;
       return;
     }
@@ -412,6 +462,7 @@ export default function MobileMirrorPage() {
       setMessages(initialMessages);
       cursorRef.current = latestMessageId(initialMessages);
       resolvedSessionIdRef.current = resolvedSessionId;
+      setSessions((prev) => bumpSessionInList(prev, resolvedSessionId, initialMessages));
       setMessagesLoading(false);
       setStreamStatus("live");
       return resolvedSessionId;
@@ -525,26 +576,18 @@ export default function MobileMirrorPage() {
     }, { replace: false });
   }, [setSearchParams]);
 
-  const reloadSessions = useCallback(() => {
-    setSessionsLoading(true);
-    setSessionsError(null);
-    api
-      .getSessions(SESSION_LIMIT, 0, profile || "", "recent")
-      .then((res) => setSessions(res.sessions))
-      .catch((error: Error) => setSessionsError(error.message || "failed to load sessions"))
-      .finally(() => setSessionsLoading(false));
-  }, [profile]);
-
   const submitComposer = useCallback(async () => {
     const text = composer.trim();
     if (!text || !selectedSessionId || sendBusy) return;
     setSendBusy(true);
+    setAwaitingReply(true);
     try {
       setComposer("");
       const result = await api.submitSessionMessage(selectedSessionId, text, profile || "");
       const targetSessionId =
         result.session_id || resolvedSessionIdRef.current || selectedSessionId;
       if (targetSessionId !== selectedSessionRef.current) {
+        setAwaitingReply(false);
         return;
       }
       await applyMessageDelta(targetSessionId, cursorRef.current, profile || "");
@@ -557,14 +600,14 @@ export default function MobileMirrorPage() {
           return next;
         }, { replace: true });
       }
-      reloadSessions();
     } catch (error) {
+      setAwaitingReply(false);
       setStreamNote(error instanceof Error ? error.message : String(error));
       setStreamStatus("error");
     } finally {
       setSendBusy(false);
     }
-  }, [applyMessageDelta, composer, profile, reloadSessions, sendBusy, selectedSessionId, setSearchParams]);
+  }, [applyMessageDelta, composer, profile, sendBusy, selectedSessionId, setSearchParams]);
 
   const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy;
   const profileLabel =
@@ -713,6 +756,7 @@ export default function MobileMirrorPage() {
                       message={message}
                     />
                   ))}
+                  {showThinking ? <ThinkingBubble /> : null}
                   <div ref={messagesEndRef} />
                 </div>
               )}
@@ -720,6 +764,9 @@ export default function MobileMirrorPage() {
 
             <form
               className="shrink-0 border-t border-current/10 bg-background-base px-3 py-3"
+              style={{
+                paddingBottom: `max(0.75rem, calc(0.75rem + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px))`,
+              }}
               onSubmit={(event) => {
                 event.preventDefault();
                 void submitComposer();
