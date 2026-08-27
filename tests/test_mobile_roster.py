@@ -81,3 +81,14 @@ async def test_mobile_roster_endpoint_returns_union(multi_bot_home, monkeypatch)
     names = {row["name"] for row in payload["profiles"]}
     assert {"boss-bot", "dev", "bsv-ops", "assistant", "mainline", "default"} <= names
     assert payload["default_only"] is False
+    assert payload["revision"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_mobile_roster_if_revision_short_circuits(multi_bot_home):
+    from hermes_cli.web_routers import profiles
+
+    first = await profiles.mobile_roster_endpoint(include_sessions=False)
+    second = await profiles.mobile_roster_endpoint(include_sessions=False, if_revision=first["revision"])
+    assert second["unchanged"] is True
+    assert second["profiles"] == []

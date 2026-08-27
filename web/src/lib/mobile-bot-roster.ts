@@ -1,4 +1,6 @@
 import { profileColor } from "@/lib/profile-color";
+import type { SessionMessage } from "@/lib/api";
+import { countPersistedMessages, previewFromMessages } from "@/lib/mobile-session-sync";
 
 export const CANONICAL_CHAT_TITLE = "Bot Chat";
 export const ACTIVE_WINDOW_S = 90;
@@ -240,6 +242,107 @@ export function sortBotsForHub(bots: MobileBotRow[]): MobileBotRow[] {
     const rightActive = botActivitySession(right)?.last_active || 0;
     return rightActive - leftActive;
   });
+}
+
+export interface BotRosterLocalBump {
+  last_active: number;
+  preview: string;
+  message_count?: number;
+}
+
+function bumpSessionSummary(
+  session: BotSessionSummary | null | undefined,
+  bump: BotRosterLocalBump,
+  fallbackId = "",
+): BotSessionSummary {
+  return {
+    id: session?.id || fallbackId,
+    resolved_id: session?.resolved_id,
+    title: session?.title || CANONICAL_CHAT_TITLE,
+    started_at: session?.started_at,
+    last_active: bump.last_active,
+    preview: bump.preview || session?.preview || "",
+    message_count:
+      bump.message_count !== undefined
+        ? Math.max(session?.message_count || 0, bump.message_count)
+        : session?.message_count,
+  };
+}
+
+export function bumpBotInRoster(
+  bots: MobileBotRow[],
+  botName: string,
+  messages?: SessionMessage[],
+): { bots: MobileBotRow[]; bump: BotRosterLocalBump | null } {
+  const preview = messages ? previewFromMessages(messages) : "";
+  const bump: BotRosterLocalBump = {
+    last_active: Math.floor(Date.now() / 1000),
+    preview,
+    message_count: messages ? countPersistedMessages(messages) : undefined,
+  };
+
+  let touched = false;
+  const next = bots.map((bot) => {
+    if (bot.name !== botName) return bot;
+    touched = true;
+    const canonical = bumpSessionSummary(bot.canonical_session, bump);
+    return {
+      ...bot,
+      canonical_session: bot.canonical_session ? canonical : canonical,
+      last_session: bot.last_session
+        ? bumpSessionSummary(bot.last_session, bump, bot.last_session.id)
+        : bot.last_session,
+    };
+  });
+
+  if (!touched) {
+    return { bots, bump };
+  }
+
+  return { bots: sortBotsForHub(next), bump };
+}
+
+export function mergeRosterWithLocalBumps(
+  bots: MobileBotRow[],
+  bumps: Map<string, BotRosterLocalBump>,
+): MobileBotRow[] {
+  if (bumps.size === 0) return bots;
+
+  const next = bots.map((bot) => {
+    const bump = bumps.get(bot.name);
+    if (!bump) return bot;
+
+    const session = botActivitySession(bot);
+    const serverActive = session?.last_active || 0;
+    if (serverActive >= bump.last_active) {
+      return bot;
+    }
+
+    const canonical = bumpSessionSummary(bot.canonical_session, bump);
+    return {
+      ...bot,
+      canonical_session: bot.canonical_session ? canonical : canonical,
+      last_session: bot.last_session
+        ? bumpSessionSummary(bot.last_session, bump, bot.last_session.id)
+        : bot.last_session,
+    };
+  });
+
+  return sortBotsForHub(next);
+}
+
+export function pruneCaughtUpRosterBumps(
+  bots: MobileBotRow[],
+  bumps: Map<string, BotRosterLocalBump>,
+): void {
+  for (const [name, bump] of bumps) {
+    const bot = bots.find((row) => row.name === name);
+    if (!bot) continue;
+    const serverActive = botActivitySession(bot)?.last_active || 0;
+    if (serverActive >= bump.last_active) {
+      bumps.delete(name);
+    }
+  }
 }
 
 export function activityLabelForGatewayEvent(type: string, payload: unknown): string | null {

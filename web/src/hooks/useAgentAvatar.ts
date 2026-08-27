@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { GatewayClient } from "@/lib/gatewayClient";
+import { api } from "@/lib/api";
 import {
   botAppearance,
   botRosterMeta,
@@ -27,7 +28,7 @@ export function findBotForHandle(bots: MobileBotRow[], handle: string): MobileBo
   );
 }
 
-async function fetchAvatarFromGateway(gateway: GatewayClient, handle: string): Promise<string | null> {
+async function fetchAvatarFromRest(handle: string, bots: MobileBotRow[]): Promise<string | null> {
   const key = handle.trim().toLowerCase();
   if (!key) return null;
 
@@ -45,25 +46,12 @@ async function fetchAvatarFromGateway(gateway: GatewayClient, handle: string): P
 
   const run = (async () => {
     try {
-      if (gateway.connectionState !== "open") {
-        await gateway.connect();
-      }
-      const listed = await gateway.request<{ profiles?: Array<{ has_avatar?: boolean; name: string }> }>(
-        "profiles.list",
-        { include_sessions: false },
-      );
-      const profiles = listed.profiles ?? [];
-      let profile = profiles.find((row) => row.name.toLowerCase() === key);
-      if (!profile && key === "hermes") {
-        profile = profiles.find((row) => row.name === "default");
-      }
-      if (!profile?.has_avatar) return null;
+      const bot = findBotForHandle(bots, key);
+      if (bot && !bot.has_avatar) return null;
 
-      const asset = await gateway.request<{ data?: string; found?: boolean }>("profiles.get_asset", {
-        asset: "avatar",
-        name: profile.name,
-      });
-      return asset?.found && asset.data ? asset.data : null;
+      const profileName = bot?.name ?? profileNameForHandle(key);
+      const asset = await api.getProfileAvatar(profileName);
+      return asset?.data ? asset.data : null;
     } catch {
       return null;
     } finally {
@@ -112,10 +100,10 @@ export function useAgentAvatar(
       return;
     }
 
-    if (!gateway) return;
+    if (!gateway && !options.bots?.length) return;
 
     let cancelled = false;
-    void fetchAvatarFromGateway(gateway, key).then((url) => {
+    void fetchAvatarFromRest(key, options.bots ?? []).then((url) => {
       if (!cancelled && url) {
         setFetchedImage(url);
       }
@@ -123,7 +111,7 @@ export function useAgentAvatar(
     return () => {
       cancelled = true;
     };
-  }, [gateway, handle, rosterImage]);
+  }, [gateway, handle, rosterImage, options.bots]);
 
   return {
     image: fetchedImage,

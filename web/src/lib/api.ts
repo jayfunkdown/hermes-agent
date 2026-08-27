@@ -685,15 +685,28 @@ export const api = {
   getProfiles: () =>
     fetchJSON<{ profiles: ProfileInfo[] }>("/api/profiles"),
   /** Desktop-parity Bot Mode roster for `/mobile` (list_profiles + ui_meta + canonical_session). */
-  getMobileRoster: (includeSessions = true) =>
-    fetchJSON<{
+  getMobileRoster: (includeSessions = true, ifRevision?: number) => {
+    const query = new URLSearchParams({
+      include_sessions: includeSessions ? "true" : "false",
+    });
+    if (ifRevision !== undefined) {
+      query.set("if_revision", String(ifRevision));
+    }
+    return fetchJSON<{
       profiles: Array<Record<string, unknown>>;
       default_only?: boolean;
       incomplete?: boolean;
       profile_count?: number;
       source?: string;
       bot_mode_protocol?: boolean;
-    }>(`/api/mobile/roster?include_sessions=${includeSessions ? "true" : "false"}`),
+      revision?: number;
+      unchanged?: boolean;
+    }>(`/api/mobile/roster?${query.toString()}`);
+  },
+  getProfileAvatar: (name: string) =>
+    fetchJSON<{ found?: boolean; data?: string; mime?: string; size?: number }>(
+      `/api/profiles/${encodeURIComponent(name)}/avatar`,
+    ),
   getActiveProfile: () =>
     fetchJSON<ActiveProfileInfo>("/api/profiles/active"),
   setActiveProfile: (name: string) =>

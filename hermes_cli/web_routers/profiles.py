@@ -216,6 +216,36 @@ def _sidebar_singleflight_cache(func):
     return wrapped
 
 
+def _bot_roster_revision(profiles: list) -> int:
+    """Cheap monotonic revision for mobile roster if_revision short-circuits."""
+    revision = 0
+    for row in profiles:
+        if not isinstance(row, dict):
+            continue
+        for field in ("canonical_session", "last_session", "worker_session"):
+            session = row.get(field)
+            if isinstance(session, dict):
+                revision = max(revision, int(session.get("last_active") or 0))
+                revision = max(revision, int(session.get("message_count") or 0))
+        ui_revs = row.get("ui_meta_revisions")
+        if isinstance(ui_revs, dict):
+            for value in ui_revs.values():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    revision = max(revision, value)
+    return revision
+
+
+def _unwrap_gateway_result(response: dict | None) -> dict:
+    if not isinstance(response, dict):
+        return {}
+    error = response.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or "gateway request failed")
+        raise HTTPException(status_code=500, detail=message)
+    result = response.get("result")
+    return result if isinstance(result, dict) else {}
+
+
 @sessions_router.get("/api/profiles/sessions")
 def get_profiles_sessions(
     # ``le=500`` caps the per-request page size (idea from #39200) — this
@@ -786,7 +816,10 @@ async def list_profiles_endpoint():
 
 
 @router.get("/api/mobile/roster")
-async def mobile_roster_endpoint(include_sessions: bool = Query(True)):
+async def mobile_roster_endpoint(
+    include_sessions: bool = Query(True),
+    if_revision: Optional[int] = Query(None, ge=0),
+):
     """Authenticated Bot Mode roster for `/mobile` (desktop-parity descriptors).
 
     Walks every local profile via ``list_profiles()`` and returns ui_meta,
@@ -798,13 +831,51 @@ async def mobile_roster_endpoint(include_sessions: bool = Query(True)):
 
     try:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        payload = await loop.run_in_executor(
             None,
             lambda: build_mobile_roster(include_sessions=bool(include_sessions)),
         )
     except Exception as exc:
         _log.exception("GET /api/mobile/roster failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, list):
+        profiles = []
+    revision = _bot_roster_revision(profiles)
+    if if_revision is not None and if_revision == revision:
+        return {
+            **{
+                key: payload[key]
+                for key in (
+                    "bot_mode_protocol",
+                    "source",
+                    "default_only",
+                    "incomplete",
+                    "profile_count",
+                )
+                if key in payload
+            },
+            "profiles": [],
+            "revision": revision,
+            "unchanged": True,
+        }
+    return {**payload, "revision": revision}
+
+
+@router.get("/api/profiles/{name}/avatar")
+def get_profile_avatar(name: str, asset: str = Query("avatar")):
+    """Profile asset as a data URL — REST twin of ``profiles.get_asset``."""
+    from hermes_cli.web_routers.sessions import _mobile_gateway_request
+
+    response = _mobile_gateway_request(
+        "profiles.get_asset",
+        {"name": name, "asset": asset},
+    )
+    payload = _unwrap_gateway_result(response)
+    if not payload.get("found"):
+        raise HTTPException(status_code=404, detail="asset not found")
+    return payload
 
 
 @router.post("/api/profiles")

@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api } from "@/lib/api";
+import { api, type SessionMessage } from "@/lib/api";
 import type { GatewayClient } from "@/lib/gatewayClient";
 import type { GatewayEvent } from "@hermes/shared";
 import {
   activityLabelForGatewayEvent,
   BOT_ROSTER_POLL_MS,
+  bumpBotInRoster,
   CANONICAL_CHAT_TITLE,
+  mergeRosterWithLocalBumps,
+  pruneCaughtUpRosterBumps,
   rosterDefaultOnlyWarning,
   rosterLoadIncomplete,
   splitRosterByHidden,
+  type BotRosterLocalBump,
   type MobileBotRow,
   type ProfilesListResult,
 } from "@/lib/mobile-bot-roster";
+
+const ROSTER_EVENT_DEBOUNCE_MS = 400;
 
 function normalizeRosterRows(profiles: unknown): MobileBotRow[] {
   if (!Array.isArray(profiles)) return [];
@@ -32,6 +38,10 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
   }>({ defaultOnly: false, incomplete: false, source: null });
   const [avatars, setAvatars] = useState<Record<string, string>>({});
   const avatarFetchedRef = useRef<Set<string>>(new Set());
+  const localBumpsRef = useRef<Map<string, BotRosterLocalBump>>(new Map());
+  const rosterRefreshTimerRef = useRef<number | null>(null);
+  const rosterRevisionRef = useRef(0);
+  const rosterLoadedRef = useRef(false);
 
   const { visible: visibleBots, hidden: hiddenBots } = useMemo(
     () => splitRosterByHidden(allBots),
@@ -39,8 +49,8 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
   );
 
   const rosterIncomplete = useMemo(
-    () => rosterLoadIncomplete(allBots, visibleBots),
-    [allBots, visibleBots],
+    () => rosterMeta.incomplete || rosterLoadIncomplete(allBots, visibleBots),
+    [allBots, rosterMeta.incomplete, visibleBots],
   );
 
   const defaultOnlyWarning = useMemo(
@@ -48,40 +58,60 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
     [allBots, rosterMeta.defaultOnly],
   );
 
-  const fetchAvatars = useCallback(
-    async (profiles: MobileBotRow[]) => {
-      if (!gateway || gateway.connectionState !== "open") return;
-      for (const bot of profiles) {
-        if (!bot.has_avatar || avatarFetchedRef.current.has(bot.name)) {
-          continue;
-        }
-        avatarFetchedRef.current.add(bot.name);
-        try {
-          const asset = await gateway.request<{ data?: string }>("profiles.get_asset", {
-            name: bot.name,
-            asset: "avatar",
-          });
-          if (asset?.data) {
-            setAvatars((prev) => ({ ...prev, [bot.name]: asset.data! }));
-          }
-        } catch {
-          /* avatar fetch is best effort */
-        }
+  const refreshAvatars = useCallback(async (profiles: MobileBotRow[]) => {
+    for (const bot of profiles) {
+      if (!bot.has_avatar) {
+        avatarFetchedRef.current.delete(bot.name);
+        continue;
       }
+      if (avatarFetchedRef.current.has(bot.name)) {
+        continue;
+      }
+      avatarFetchedRef.current.add(bot.name);
+      try {
+        const asset = await api.getProfileAvatar(bot.name);
+        if (asset?.data) {
+          setAvatars((prev) => ({ ...prev, [bot.name]: asset.data! }));
+        }
+      } catch {
+        avatarFetchedRef.current.delete(bot.name);
+      }
+    }
+  }, []);
+
+  const applyRosterRows = useCallback(
+    (profiles: MobileBotRow[], meta: typeof rosterMeta) => {
+      pruneCaughtUpRosterBumps(profiles, localBumpsRef.current);
+      const merged = mergeRosterWithLocalBumps(profiles, localBumpsRef.current);
+      setAllBots(merged);
+      setRosterMeta(meta);
+      void refreshAvatars(merged);
     },
-    [gateway],
+    [refreshAvatars],
   );
 
   const refresh = useCallback(async () => {
     setError(null);
     try {
-      // Prefer authenticated REST — same list_profiles walk as desktop, works
-      // even when the WS gateway is slow/unavailable, and flags default_only.
       let profiles: MobileBotRow[] = [];
       let meta = { defaultOnly: false, incomplete: false, source: "rest" as string | null };
 
       try {
-        const rest = await api.getMobileRoster(true);
+        const rest = await api.getMobileRoster(
+          true,
+          rosterLoadedRef.current ? rosterRevisionRef.current : undefined,
+        );
+        rosterLoadedRef.current = true;
+        if (rest.revision && rest.revision > rosterRevisionRef.current) {
+          rosterRevisionRef.current = rest.revision;
+        }
+        if (rest.unchanged) {
+          setAllBots((prev) => {
+            pruneCaughtUpRosterBumps(prev, localBumpsRef.current);
+            return mergeRosterWithLocalBumps(prev, localBumpsRef.current);
+          });
+          return;
+        }
         profiles = normalizeRosterRows(rest.profiles);
         meta = {
           defaultOnly: Boolean(rest.default_only),
@@ -89,7 +119,6 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
           source: rest.source || "rest",
         };
       } catch {
-        // Fall back to gateway profiles.list (desktop parity path).
         if (!gateway || gateway.connectionState !== "open") {
           throw new Error("Could not load Bot Mode roster");
         }
@@ -104,61 +133,101 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
         };
       }
 
-      setAllBots(profiles);
-      setRosterMeta(meta);
-      await fetchAvatars(profiles);
+      applyRosterRows(profiles, meta);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, [fetchAvatars, gateway]);
+  }, [applyRosterRows, gateway]);
+
+  const scheduleRefresh = useCallback(() => {
+    if (rosterRefreshTimerRef.current !== null) {
+      window.clearTimeout(rosterRefreshTimerRef.current);
+    }
+    rosterRefreshTimerRef.current = window.setTimeout(() => {
+      rosterRefreshTimerRef.current = null;
+      void refresh();
+    }, ROSTER_EVENT_DEBOUNCE_MS);
+  }, [refresh]);
+
+  const bumpBotFromMessages = useCallback((botName: string, messages: SessionMessage[]) => {
+    if (!botName) return;
+    setAllBots((prev) => {
+      const { bots: bumped, bump } = bumpBotInRoster(prev, botName, messages);
+      if (bump) {
+        localBumpsRef.current.set(botName, bump);
+      }
+      return bumped;
+    });
+  }, []);
 
   useEffect(() => {
-    if (!gateway) {
-      // REST-only path still works without a gateway socket.
-      void refresh();
-      return;
-    }
     let cancelled = false;
-    const connect = async () => {
+    const load = async () => {
       try {
-        if (gateway.connectionState !== "open") {
-          await gateway.connect();
-        }
         if (!cancelled) {
           await refresh();
         }
       } catch (err) {
         if (!cancelled) {
-          // Still try REST even if WS connect fails.
-          try {
-            await refresh();
-          } catch {
-            setError(err instanceof Error ? err.message : String(err));
-            setLoading(false);
-          }
+          setError(err instanceof Error ? err.message : String(err));
+          setLoading(false);
         }
       }
     };
-    void connect();
+    void load();
+
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         void refresh();
       }
     }, BOT_ROSTER_POLL_MS);
+
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
         void refresh();
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
+
+    const shouldRefreshFromEvent = (event: GatewayEvent) => {
+      const type = event.type;
+      return (
+        type === "message.complete" ||
+        type === "message.start" ||
+        type === "status.update" ||
+        type === "tool.complete"
+      );
+    };
+
+    const unsubs = gateway
+      ? [
+          gateway.on("message.complete", (event) => {
+            if (shouldRefreshFromEvent(event)) scheduleRefresh();
+          }),
+          gateway.on("message.start", (event) => {
+            if (shouldRefreshFromEvent(event)) scheduleRefresh();
+          }),
+          gateway.on("status.update", (event) => {
+            if (shouldRefreshFromEvent(event)) scheduleRefresh();
+          }),
+          gateway.on("tool.complete", (event) => {
+            if (shouldRefreshFromEvent(event)) scheduleRefresh();
+          }),
+        ]
+      : [];
+
     return () => {
       cancelled = true;
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
+      if (rosterRefreshTimerRef.current !== null) {
+        window.clearTimeout(rosterRefreshTimerRef.current);
+      }
+      for (const unsub of unsubs) unsub();
     };
-  }, [gateway, refresh]);
+  }, [gateway, refresh, scheduleRefresh]);
 
   return {
     allBots,
@@ -171,6 +240,7 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
     error,
     avatars,
     refresh,
+    bumpBotFromMessages,
   };
 }
 

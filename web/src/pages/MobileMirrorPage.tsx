@@ -198,6 +198,7 @@ export default function MobileMirrorPage() {
     error: botsError,
     avatars,
     refresh: refreshBots,
+    bumpBotFromMessages,
   } = useMobileBotRoster(gateway);
   const keyboardInset = useMobileKeyboardInset();
 
@@ -287,22 +288,36 @@ export default function MobileMirrorPage() {
   }, [activities, inChat, messages, messagesLoading, showThinking]);
 
   const applyMessageDelta = useCallback(async (sessionId: string, afterId: number, profileName: string) => {
-    const next = await api.getSessionMessagesSince(sessionId, afterId, profileName);
+    const next = await api.getSessionMessagesSince(
+      sessionId,
+      afterId,
+      profileName,
+      cursorRef.current || undefined,
+    );
+    if (next.unchanged) {
+      const revision = next.latest_message_id ?? next.revision ?? cursorRef.current;
+      if (revision > cursorRef.current) cursorRef.current = revision;
+      return;
+    }
     const incoming = next.messages ?? [];
     if (incoming.length === 0) {
       const revision = next.latest_message_id ?? next.revision ?? afterId;
       if (revision > cursorRef.current) cursorRef.current = revision;
       return;
     }
+    let mergedMessages: SessionMessage[] | null = null;
     setMessages((prev) => {
-      const merged = mergeSessionMessages(prev, incoming);
-      cursorRef.current = latestMessageId(merged);
+      mergedMessages = mergeSessionMessages(prev, incoming);
+      cursorRef.current = latestMessageId(mergedMessages);
       if (incoming.some((message) => message.role === "assistant")) {
         setAwaitingReply(false);
       }
-      return merged;
+      return mergedMessages;
     });
-  }, []);
+    if (mergedMessages) {
+      bumpBotFromMessages(profileName.trim() || "default", mergedMessages);
+    }
+  }, [bumpBotFromMessages]);
 
   useEffect(() => {
     if (!sessionParam || sessionParam === selectedSessionId) return;
