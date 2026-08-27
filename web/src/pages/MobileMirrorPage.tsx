@@ -10,6 +10,7 @@ import {
   AgentDeliveryNotice,
   AgentDeliveryToolNotice,
 } from "@/components/mobile/AgentDeliveryNotice";
+import { AgentActivityNotice } from "@/components/mobile/AgentActivityNotice";
 import { MobileBotRow } from "@/components/mobile/MobileBotRow";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -18,6 +19,7 @@ import {
   ensureCanonicalChat,
   useMobileBotActivity,
   useMobileBotRoster,
+  useMobileHubActivity,
 } from "@/hooks/useMobileBotRoster";
 import { api, authedFetch, type SessionMessage } from "@/lib/api";
 import {
@@ -94,16 +96,6 @@ function ThinkingBubble() {
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:120ms]" />
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:240ms]" />
         </span>
-      </div>
-    </article>
-  );
-}
-
-function ActivityBubble({ label }: { label: string }) {
-  return (
-    <article className="flex w-full justify-center">
-      <div className="rounded-full border border-current/10 bg-muted/25 px-3 py-1 text-xs text-text-tertiary">
-        {label}
       </div>
     </article>
   );
@@ -200,6 +192,7 @@ export default function MobileMirrorPage() {
     refresh: refreshBots,
     bumpBotFromMessages,
   } = useMobileBotRoster(gateway);
+  const { busyBots, activityLabels } = useMobileHubActivity(gateway);
   const keyboardInset = useMobileKeyboardInset();
 
   const selectedSessionRef = useRef(selectedSessionId);
@@ -230,7 +223,7 @@ export default function MobileMirrorPage() {
       : activeBot.name
     : profile;
 
-  const { busy: gatewayBusy, activities } = useMobileBotActivity(
+  const { busy: gatewayBusy, activities, latestActivityLabel } = useMobileBotActivity(
     gateway,
     selectedSessionId,
     scopedProfile || "",
@@ -253,19 +246,18 @@ export default function MobileMirrorPage() {
   }, [hubBots, hubQuery]);
 
   const inChat = Boolean(selectedSessionId);
-  const busyBotName = gatewayBusy && activeBot ? activeBot.name : null;
 
   const statusText = useMemo(() => {
     if (!selectedSessionId) return "Pick an agent";
     if (chatLoadFailed) return "Chat unavailable";
     if (messagesLoading) return "Loading messages…";
-    if (gatewayBusy) return "Working…";
+    if (gatewayBusy) return latestActivityLabel || "Working…";
     if (streamStatus === "connecting") return "Connecting…";
     if (streamStatus === "reconnecting") return "Reconnecting…";
     if (streamStatus === "live") return "Live";
     if (streamStatus === "error") return streamNote ?? "Sync unavailable";
     return "Ready";
-  }, [chatLoadFailed, gatewayBusy, messagesLoading, selectedSessionId, streamNote, streamStatus]);
+  }, [chatLoadFailed, gatewayBusy, latestActivityLabel, messagesLoading, selectedSessionId, streamNote, streamStatus]);
 
   const showThinking = useMemo(
     () =>
@@ -659,8 +651,9 @@ export default function MobileMirrorPage() {
                   active={bot.name === activeBot?.name}
                   archived={hubView === "archived"}
                   avatarUrl={avatars[bot.name]}
-                  activeProfile={scopedProfile || "default"}
-                  busyBotName={busyBotName}
+                  activeProfile={bot.name}
+                  busyBotName={busyBots[bot.name] ? bot.name : null}
+                  activityLabel={activityLabels[bot.name] ?? null}
                   onClick={() => void openBot(bot)}
                 />
               ))}
@@ -783,10 +776,19 @@ export default function MobileMirrorPage() {
                         />
                       );
                     }
+                    if (item.kind === "activity-notice") {
+                      return (
+                        <AgentActivityNotice
+                          key={item.key}
+                          label={item.label}
+                          pending={item.pending}
+                        />
+                      );
+                    }
                     return <ChatBubble key={item.key} message={item.message} />;
                   })}
                   {activities.map((item) => (
-                    <ActivityBubble key={item.id} label={item.label} />
+                    <AgentActivityNotice key={item.id} label={item.label} pending={item.pending} />
                   ))}
                   {showThinking ? <ThinkingBubble /> : null}
                   <div ref={messagesEndRef} />

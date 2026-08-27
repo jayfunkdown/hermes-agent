@@ -18,6 +18,7 @@ interface MobileBotRowProps {
   avatarUrl?: string | null;
   activeProfile: string;
   busyBotName: string | null;
+  activityLabel?: string | null;
   onClick: () => void;
 }
 
@@ -28,12 +29,13 @@ export function MobileBotRow({
   avatarUrl,
   activeProfile,
   busyBotName,
+  activityLabel,
   onClick,
 }: MobileBotRowProps) {
   const meta = botRosterMeta(bot);
   const { shape, color, image } = botAppearance(bot.name, meta);
   const mood = botMood(bot, { activeProfile, busyBotName });
-  const statusLabel = botRowStatusLabel(bot, { activeProfile, busyBotName });
+  const statusLabel = botRowStatusLabel(bot, { activeProfile, busyBotName, activityLabel });
   const preview = statusLabel || botRowPreview(bot);
   const handle = botHandle(bot.name, bot);
   const lastActive = bot.canonical_session?.last_active || bot.last_session?.last_active || 0;

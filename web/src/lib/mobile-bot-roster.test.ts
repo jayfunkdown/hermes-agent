@@ -5,6 +5,7 @@ import {
   botHandle,
   botMood,
   botRowPreview,
+  botRowStatusLabel,
   canonicalChatSessionId,
   displayName,
   formatMobileError,
@@ -89,9 +90,32 @@ describe("mobile-bot-roster", () => {
   });
 
   it("maps gateway activity events to labels", () => {
-    expect(activityLabelForGatewayEvent("tool.start", { name: "memory" })).toBe("Running memory");
+    expect(activityLabelForGatewayEvent("tool.start", { name: "memory" })).toBe("Saving to memory");
+    expect(activityLabelForGatewayEvent("tool.complete", { name: "memory" })).toBe("Saved to memory");
     expect(activityLabelForGatewayEvent("tool.generating", { name: "reply" })).toBe("Drafting reply…");
-    expect(activityLabelForGatewayEvent("status.update", { message: "Writing memory…" })).toBe("Writing memory…");
+    expect(activityLabelForGatewayEvent("status.update", { text: "Writing memory…" })).toBe("Writing memory…");
+    expect(activityLabelForGatewayEvent("status.update", { kind: "compacting" })).toBe("Summarizing thread");
+    expect(activityLabelForGatewayEvent("review.summary", { text: "updated skill routing" })).toBe(
+      "Self-improvement review: updated skill routing",
+    );
+  });
+
+  it("shows latest activity label on busy bot rows", () => {
+    const row = bot({ name: "alpha" });
+    expect(
+      botRowStatusLabel(row, {
+        activeProfile: "alpha",
+        busyBotName: "alpha",
+        activityLabel: "Saving to memory",
+      }),
+    ).toBe("Saving to memory");
+    expect(
+      botRowStatusLabel(row, {
+        activeProfile: "alpha",
+        busyBotName: "alpha",
+        activityLabel: null,
+      }),
+    ).toBe("Working…");
   });
 
   it("reads hidden flag from ui_meta hermes-bots (desktop parity)", () => {

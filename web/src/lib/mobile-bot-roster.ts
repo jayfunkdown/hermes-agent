@@ -1,6 +1,9 @@
 import { profileColor } from "@/lib/profile-color";
 import type { SessionMessage } from "@/lib/api";
+import { activityLabelForGatewayEvent } from "@/lib/mobile-activity-notices";
 import { countPersistedMessages, previewFromMessages } from "@/lib/mobile-session-sync";
+
+export { activityLabelForGatewayEvent };
 
 export const CANONICAL_CHAT_TITLE = "Bot Chat";
 export const ACTIVE_WINDOW_S = 90;
@@ -217,10 +220,10 @@ export function botRowPreview(bot: MobileBotRow): string {
 
 export function botRowStatusLabel(
   bot: MobileBotRow,
-  options: { activeProfile: string; busyBotName: string | null },
+  options: { activeProfile: string; busyBotName: string | null; activityLabel?: string | null },
 ): string | null {
   if (botMood(bot, options) === "work") {
-    return "Working…";
+    return options.activityLabel?.trim() || "Working…";
   }
   return null;
 }
@@ -342,28 +345,5 @@ export function pruneCaughtUpRosterBumps(
     if (serverActive >= bump.last_active) {
       bumps.delete(name);
     }
-  }
-}
-
-export function activityLabelForGatewayEvent(type: string, payload: unknown): string | null {
-  const data =
-    payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
-  switch (type) {
-    case "thinking.delta":
-      return "Thinking…";
-    case "tool.start":
-      return typeof data.name === "string" ? `Running ${data.name}` : "Running tool";
-    case "tool.progress":
-      return typeof data.message === "string" ? data.message : "Tool in progress";
-    case "tool.complete":
-      return typeof data.name === "string" ? `Finished ${data.name}` : "Tool finished";
-    case "tool.generating":
-      return typeof data.name === "string" ? `Drafting ${data.name}…` : "Generating…";
-    case "status.update":
-      return typeof data.message === "string" ? data.message : "Status update";
-    case "message.interim":
-      return typeof data.text === "string" ? data.text : "Drafting reply…";
-    default:
-      return null;
   }
 }

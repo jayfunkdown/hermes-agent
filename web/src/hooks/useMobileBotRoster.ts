@@ -17,6 +17,7 @@ import {
   type MobileBotRow,
   type ProfilesListResult,
 } from "@/lib/mobile-bot-roster";
+import { isPendingActivityType } from "@/lib/mobile-activity-notices";
 
 const ROSTER_EVENT_DEBOUNCE_MS = 400;
 
@@ -275,6 +276,93 @@ export interface AgentActivityItem {
   id: string;
   label: string;
   at: number;
+  pending: boolean;
+}
+
+function botNameFromGatewayEvent(event: GatewayEvent): string {
+  const profile = (event.profile || "").trim();
+  return profile || "default";
+}
+
+export function useMobileHubActivity(gateway: GatewayClient | null) {
+  const [busyBots, setBusyBots] = useState<Record<string, boolean>>({});
+  const [activityLabels, setActivityLabels] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!gateway || gateway.connectionState !== "open") {
+      setBusyBots({});
+      setActivityLabels({});
+      return;
+    }
+
+    const markBusy = (bot: string) => {
+      setBusyBots((prev) => (prev[bot] ? prev : { ...prev, [bot]: true }));
+    };
+
+    const markIdle = (bot: string) => {
+      setBusyBots((prev) => {
+        if (!prev[bot]) return prev;
+        const next = { ...prev };
+        delete next[bot];
+        return next;
+      });
+    };
+
+    const pushLabel = (bot: string, type: string, event: GatewayEvent) => {
+      const label = activityLabelForGatewayEvent(type, event.payload);
+      if (!label) return;
+      setActivityLabels((prev) => (prev[bot] === label ? prev : { ...prev, [bot]: label }));
+    };
+
+    const unsubs = [
+      gateway.on("message.start", (event) => {
+        markBusy(botNameFromGatewayEvent(event));
+      }),
+      gateway.on("message.complete", (event) => {
+        markIdle(botNameFromGatewayEvent(event));
+      }),
+      gateway.on("thinking.delta", (event) => {
+        const bot = botNameFromGatewayEvent(event);
+        markBusy(bot);
+        pushLabel(bot, "thinking.delta", event);
+      }),
+      gateway.on("tool.generating", (event) => {
+        const bot = botNameFromGatewayEvent(event);
+        markBusy(bot);
+        pushLabel(bot, "tool.generating", event);
+      }),
+      gateway.on("tool.start", (event) => {
+        const bot = botNameFromGatewayEvent(event);
+        markBusy(bot);
+        pushLabel(bot, "tool.start", event);
+      }),
+      gateway.on("tool.progress", (event) => {
+        pushLabel(botNameFromGatewayEvent(event), "tool.progress", event);
+      }),
+      gateway.on("tool.complete", (event) => {
+        pushLabel(botNameFromGatewayEvent(event), "tool.complete", event);
+      }),
+      gateway.on("status.update", (event) => {
+        pushLabel(botNameFromGatewayEvent(event), "status.update", event);
+      }),
+      gateway.on("message.interim", (event) => {
+        const bot = botNameFromGatewayEvent(event);
+        markBusy(bot);
+        pushLabel(bot, "message.interim", event);
+      }),
+      gateway.on("review.summary", (event) => {
+        pushLabel(botNameFromGatewayEvent(event), "review.summary", event);
+      }),
+    ];
+
+    return () => {
+      for (const unsub of unsubs) unsub();
+      setBusyBots({});
+      setActivityLabels({});
+    };
+  }, [gateway]);
+
+  return { busyBots, activityLabels };
 }
 
 export function useMobileBotActivity(
@@ -295,9 +383,10 @@ export function useMobileBotActivity(
     const pushActivity = (type: string, event: GatewayEvent) => {
       const label = activityLabelForGatewayEvent(type, event.payload);
       if (!label) return;
+      const pending = isPendingActivityType(type);
       setActivities((prev) => [
         ...prev.slice(-12),
-        { id: `${type}-${Date.now()}-${prev.length}`, label, at: Date.now() },
+        { id: `${type}-${Date.now()}-${prev.length}`, label, at: Date.now(), pending },
       ]);
     };
 
@@ -351,6 +440,10 @@ export function useMobileBotActivity(
         if (!matches(event)) return;
         pushActivity("message.interim", event);
       }),
+      gateway.on("review.summary", (event) => {
+        if (!matches(event)) return;
+        pushActivity("review.summary", event);
+      }),
     ];
 
     return () => {
@@ -360,5 +453,7 @@ export function useMobileBotActivity(
     };
   }, [gateway, profileName, sessionId]);
 
-  return { busy, activities };
+  const latestActivityLabel = activities.length > 0 ? activities[activities.length - 1]?.label ?? null : null;
+
+  return { busy, activities, latestActivityLabel };
 }

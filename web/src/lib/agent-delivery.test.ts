@@ -91,4 +91,30 @@ describe("renderMobileSessionMessages", () => {
       expect(rendered[0].delivery.replyBody).toBe("ack from dev");
     }
   });
+
+  it("renders persisted tool activity as compact notices", () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 4,
+        role: "tool",
+        tool_name: "memory",
+        content: "saved",
+      },
+      {
+        id: 5,
+        role: "system",
+        content: "review:Self-improvement review: tuned routing",
+      },
+    ];
+    const rendered = renderMobileSessionMessages(messages);
+    expect(rendered).toHaveLength(2);
+    expect(rendered[0]?.kind).toBe("activity-notice");
+    if (rendered[0]?.kind === "activity-notice") {
+      expect(rendered[0].label).toBe("Saved to memory");
+    }
+    expect(rendered[1]?.kind).toBe("activity-notice");
+    if (rendered[1]?.kind === "activity-notice") {
+      expect(rendered[1].label).toContain("Self-improvement review");
+    }
+  });
 });

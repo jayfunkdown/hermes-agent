@@ -7,6 +7,7 @@ import {
   replyTextFromResult,
   type ParsedAgentMessage,
 } from "@/lib/agent-delivery";
+import { systemNoticeLabel, toolNoticeLabel } from "@/lib/mobile-activity-notices";
 
 export interface AgentSendDelivery {
   target: string;
@@ -17,7 +18,8 @@ export interface AgentSendDelivery {
 export type MobileRenderedMessage =
   | { kind: "chat"; message: SessionMessage; key: string }
   | { kind: "agent-receive"; message: SessionMessage; parsed: ParsedAgentMessage; key: string }
-  | { kind: "agent-send"; message: SessionMessage; delivery: AgentSendDelivery; key: string };
+  | { kind: "agent-send"; message: SessionMessage; delivery: AgentSendDelivery; key: string }
+  | { kind: "activity-notice"; label: string; pending?: boolean; key: string };
 
 export function renderMobileSessionMessages(messages: SessionMessage[]): MobileRenderedMessage[] {
   const consumedToolCallIds = new Set<string>();
@@ -83,6 +85,31 @@ export function renderMobileSessionMessages(messages: SessionMessage[]): MobileR
 
     if (message.role === "tool" && message.tool_call_id && consumedToolCallIds.has(message.tool_call_id)) {
       continue;
+    }
+
+    if (message.role === "system") {
+      const activityLabel = systemNoticeLabel(message.content);
+      if (activityLabel) {
+        rendered.push({
+          kind: "activity-notice",
+          label: activityLabel,
+          key: `activity-system-${message.id ?? index}`,
+        });
+      }
+      continue;
+    }
+
+    if (message.role === "tool") {
+      const activityLabel = toolNoticeLabel(message);
+      if (activityLabel) {
+        rendered.push({
+          kind: "activity-notice",
+          label: activityLabel,
+          pending: message.active === true,
+          key: `activity-tool-${message.id ?? index}`,
+        });
+        continue;
+      }
     }
 
     rendered.push({
