@@ -5,9 +5,12 @@ import {
   botHandle,
   botMood,
   botRowPreview,
+  bumpBotInRoster,
   canonicalChatSessionId,
   displayName,
+  mergeRosterWithLocalBumps,
   partitionBotsForHub,
+  pruneCaughtUpRosterBumps,
   sortBotsForHub,
   stripAgentPreview,
   type MobileBotRow,
@@ -82,6 +85,48 @@ describe("mobile-bot-roster", () => {
     );
     expect(rows.visible).toHaveLength(0);
     expect(rows.hidden.map((row) => row.name)).toEqual(["ghost"]);
+  });
+
+  it("bumps canonical session preview locally before the next profiles.list poll", () => {
+    const { bots: bumped, bump } = bumpBotInRoster(
+      [
+        bot({
+          name: "dev",
+          canonical_session: { id: "chat-1", last_active: 10, preview: "old" },
+        }),
+      ],
+      "dev",
+      [{ id: 2, role: "assistant", content: "fresh reply" }],
+    );
+    expect(bump?.preview).toBe("fresh reply");
+    expect(bumped[0]?.canonical_session?.preview).toBe("fresh reply");
+    expect((bumped[0]?.canonical_session?.last_active || 0) > 10).toBe(true);
+  });
+
+  it("keeps local bumps across unchanged server snapshots until the server catches up", () => {
+    const bumps = new Map([
+      ["dev", { last_active: 500, preview: "local preview" }],
+    ]);
+    const merged = mergeRosterWithLocalBumps(
+      [
+        bot({
+          name: "dev",
+          canonical_session: { id: "chat-1", last_active: 100, preview: "stale server" },
+        }),
+      ],
+      bumps,
+    );
+    expect(merged[0]?.canonical_session?.preview).toBe("local preview");
+    pruneCaughtUpRosterBumps(
+      [
+        bot({
+          name: "dev",
+          canonical_session: { id: "chat-1", last_active: 600, preview: "server caught up" },
+        }),
+      ],
+      bumps,
+    );
+    expect(bumps.size).toBe(0);
   });
 
   it("maps gateway activity events to labels", () => {

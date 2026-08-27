@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GatewayClient } from "@/lib/gatewayClient";
+import type { SessionMessage } from "@/lib/api";
 import type { GatewayEvent } from "@hermes/shared";
 import {
   activityLabelForGatewayEvent,
   BOT_ROSTER_POLL_MS,
+  bumpBotInRoster,
   CANONICAL_CHAT_TITLE,
+  mergeRosterWithLocalBumps,
+  pruneCaughtUpRosterBumps,
   sortBotsForHub,
+  type BotRosterLocalBump,
   type MobileBotRow,
   type ProfilesListResult,
 } from "@/lib/mobile-bot-roster";
+
+const ROSTER_EVENT_DEBOUNCE_MS = 400;
 
 export function useMobileBotRoster(gateway: GatewayClient | null) {
   const [bots, setBots] = useState<MobileBotRow[]>([]);
@@ -17,6 +24,9 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
   const [error, setError] = useState<string | null>(null);
   const [avatars, setAvatars] = useState<Record<string, string>>({});
   const avatarFetchedRef = useRef<Set<string>>(new Set());
+  const localBumpsRef = useRef<Map<string, BotRosterLocalBump>>(new Map());
+  const rosterRefreshTimerRef = useRef<number | null>(null);
+  const wasConnectedRef = useRef(false);
 
   const refresh = useCallback(async () => {
     if (!gateway || gateway.connectionState !== "open") {
@@ -26,10 +36,16 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
     try {
       const result = await gateway.request<ProfilesListResult>("profiles.list", {});
       const roster = sortBotsForHub(result.profiles ?? []);
-      setBots(roster);
+      pruneCaughtUpRosterBumps(roster, localBumpsRef.current);
+      const merged = mergeRosterWithLocalBumps(roster, localBumpsRef.current);
+      setBots(merged);
 
-      for (const bot of roster) {
-        if (!bot.has_avatar || avatarFetchedRef.current.has(bot.name)) {
+      for (const bot of merged) {
+        if (!bot.has_avatar) {
+          avatarFetchedRef.current.delete(bot.name);
+          continue;
+        }
+        if (avatarFetchedRef.current.has(bot.name)) {
           continue;
         }
         avatarFetchedRef.current.add(bot.name);
@@ -42,7 +58,7 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
             setAvatars((prev) => ({ ...prev, [bot.name]: asset.data! }));
           }
         } catch {
-          /* avatar fetch is best effort */
+          avatarFetchedRef.current.delete(bot.name);
         }
       }
     } catch (err) {
@@ -51,6 +67,27 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
       setLoading(false);
     }
   }, [gateway]);
+
+  const scheduleRefresh = useCallback(() => {
+    if (rosterRefreshTimerRef.current !== null) {
+      window.clearTimeout(rosterRefreshTimerRef.current);
+    }
+    rosterRefreshTimerRef.current = window.setTimeout(() => {
+      rosterRefreshTimerRef.current = null;
+      void refresh();
+    }, ROSTER_EVENT_DEBOUNCE_MS);
+  }, [refresh]);
+
+  const bumpBotFromMessages = useCallback((botName: string, messages: SessionMessage[]) => {
+    if (!botName) return;
+    setBots((prev) => {
+      const { bots: bumped, bump } = bumpBotInRoster(prev, botName, messages);
+      if (bump) {
+        localBumpsRef.current.set(botName, bump);
+      }
+      return bumped;
+    });
+  }, []);
 
   useEffect(() => {
     if (!gateway) return;
@@ -71,25 +108,66 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
       }
     };
     void connect();
+
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         void refresh();
       }
     }, BOT_ROSTER_POLL_MS);
+
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
         void refresh();
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
+
+    const connectionTimer = window.setInterval(() => {
+      const open = gateway.connectionState === "open";
+      if (open && !wasConnectedRef.current) {
+        void refresh();
+      }
+      wasConnectedRef.current = open;
+    }, 1_000);
+
+    const shouldRefreshFromEvent = (event: GatewayEvent) => {
+      const type = event.type;
+      return (
+        type === "message.complete" ||
+        type === "message.start" ||
+        type === "status.update" ||
+        type === "tool.complete"
+      );
+    };
+
+    const unsubs = [
+      gateway.on("message.complete", (event) => {
+        if (shouldRefreshFromEvent(event)) scheduleRefresh();
+      }),
+      gateway.on("message.start", (event) => {
+        if (shouldRefreshFromEvent(event)) scheduleRefresh();
+      }),
+      gateway.on("status.update", (event) => {
+        if (shouldRefreshFromEvent(event)) scheduleRefresh();
+      }),
+      gateway.on("tool.complete", (event) => {
+        if (shouldRefreshFromEvent(event)) scheduleRefresh();
+      }),
+    ];
+
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      window.clearInterval(connectionTimer);
       document.removeEventListener("visibilitychange", onVisibility);
+      if (rosterRefreshTimerRef.current !== null) {
+        window.clearTimeout(rosterRefreshTimerRef.current);
+      }
+      for (const unsub of unsubs) unsub();
     };
-  }, [gateway, refresh]);
+  }, [gateway, refresh, scheduleRefresh]);
 
-  return { bots, loading, error, avatars, refresh };
+  return { bots, loading, error, avatars, refresh, bumpBotFromMessages };
 }
 
 export async function ensureCanonicalChat(
