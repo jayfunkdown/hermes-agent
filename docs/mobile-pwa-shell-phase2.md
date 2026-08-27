@@ -19,8 +19,10 @@ non-empty string up to 20,000 characters and returns `202`-style acceptance:
 {"ok":true,"accepted":true,"session_id":"..."}
 ```
 
-Requests are scoped to a live session and limited to 20 messages per client IP
-per 60 seconds. Expired/revoked dashboard sessions are rejected by the normal
+Requests are scoped to a stored session id. The route resumes the session on
+the gateway (`session.resume` with `omit_messages` + `defer_history`) before
+dispatching `prompt.submit`, so mobile clients do not need a live runtime id.
+Rate limit: 20 messages per client IP per 60 seconds. Expired/revoked dashboard sessions are rejected by the normal
 auth middleware; session revocation is performed through the existing Hermes
 logout/session revocation path. The gateway's `prompt.submit` transport handles
 the message; input is never executed as a shell command.

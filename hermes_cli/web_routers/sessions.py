@@ -52,6 +52,25 @@ class _MobilePromptTransport:
     def close(self) -> None:
         return None
 
+
+def _mobile_gateway_request(method: str, params: dict) -> dict | None:
+    """Run a gateway RPC synchronously for the mobile REST send path."""
+    from tui_gateway import server
+
+    req = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": method, "params": params}
+    if method in server._LONG_HANDLERS:
+        return server.handle_request(req)
+    return server.dispatch(req, _MobilePromptTransport())
+
+
+def _mobile_gateway_error(response: dict | None) -> str | None:
+    if not isinstance(response, dict):
+        return "gateway request failed"
+    error = response.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or "gateway request failed")
+    return None
+
 # Late-bound web_server helpers (resolved at call time; cycle-safe,
 # monkeypatch-transparent).
 _cron_default_profile = late("_cron_default_profile")
@@ -614,7 +633,11 @@ async def get_session_latest_descendant(
 
 
 @manage_router.post("/api/sessions/{session_id}/messages")
-async def submit_session_message(session_id: str, request: Request):
+async def submit_session_message(
+    session_id: str,
+    request: Request,
+    profile: Optional[str] = None,
+):
     """Submit plain text through the authenticated gateway RPC path."""
     try:
         payload = await request.json()
@@ -635,14 +658,38 @@ async def submit_session_message(session_id: str, request: Request):
             raise HTTPException(status_code=429, detail="mobile message rate limit exceeded")
         recent.append(now)
         _mobile_send_history[client_key] = recent
-    from tui_gateway import server
-    if session_id not in server._sessions:
-        raise HTTPException(status_code=404, detail="live session not found")
-    rpc = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": "prompt.submit", "params": {"session_id": session_id, "text": text}}
-    response = await asyncio.to_thread(server.dispatch, rpc, _MobilePromptTransport())
-    if isinstance(response, dict) and response.get("error"):
-        raise HTTPException(status_code=409, detail=response["error"].get("message", "session rejected prompt"))
-    return {"ok": True, "session_id": session_id, "accepted": True}
+
+    resume_params: dict[str, Any] = {
+        "session_id": session_id,
+        "omit_messages": True,
+        "defer_history": True,
+    }
+    if profile:
+        resume_params["profile"] = profile
+    resume_response = await asyncio.to_thread(
+        _mobile_gateway_request, "session.resume", resume_params
+    )
+    resume_error = _mobile_gateway_error(resume_response)
+    if resume_error:
+        raise HTTPException(status_code=404, detail=resume_error)
+    resume_result = resume_response.get("result") if isinstance(resume_response, dict) else None
+    live_session_id = (
+        str(resume_result.get("session_id"))
+        if isinstance(resume_result, dict) and resume_result.get("session_id")
+        else ""
+    )
+    if not live_session_id:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    submit_response = await asyncio.to_thread(
+        _mobile_gateway_request,
+        "prompt.submit",
+        {"session_id": live_session_id, "text": text},
+    )
+    submit_error = _mobile_gateway_error(submit_response)
+    if submit_error:
+        raise HTTPException(status_code=409, detail=submit_error)
+    return {"ok": True, "session_id": live_session_id, "accepted": True}
 
 
 @manage_router.get("/api/sessions/{session_id}/messages")
