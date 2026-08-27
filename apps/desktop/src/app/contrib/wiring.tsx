@@ -43,7 +43,7 @@ import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
 import { $activeConnectionId } from '@/store/connections'
-import { openManagementCanonicalChat } from '@/store/management-canonical-chat'
+import { openManagementCanonicalChat, shouldUseManagementCanonicalChat } from '@/store/management-canonical-chat'
 import { $cronReviewRequest, setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { notify, notifyError } from '@/store/notifications'
@@ -547,15 +547,22 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     }
 
     lastGatewayScopeRef.current = gatewayScope
-    // Force: the new source/profile pair has its own defaults, so reseed the
-    // selector even if the composer already shows values from the previous
-    // backend. These refreshes carry intent tokens so an in-flight picker
-    // click still wins.
-    void refreshCurrentModel(true)
-    void refreshHermesConfig(true)
-    void refreshActiveProfile()
-    resetProjectTreeState()
-  }, [gatewayScope, refreshCurrentModel, refreshHermesConfig])
+    void (async () => {
+      const profile = normalizeProfileKey($activeGatewayProfile.get())
+      if (shouldUseManagementCanonicalChat(profile)) {
+        try {
+          await openManagementCanonicalChat(profile, resumeSession)
+        } catch (error) {
+          console.warn('[management-canonical] gateway-scope rebind failed', error)
+        }
+      }
+
+      void refreshCurrentModel(true)
+      void refreshHermesConfig(true)
+      void refreshActiveProfile()
+      resetProjectTreeState()
+    })()
+  }, [gatewayScope, refreshCurrentModel, refreshHermesConfig, resumeSession])
 
   // New session anchored to a workspace. Seeds cwd + branch from the clicked
   // workspace; an explicit worktree path also drills the sidebar into that

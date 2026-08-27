@@ -1,12 +1,11 @@
-import type { DesktopPluginProfileRoute } from '@/global'
 import {
   CANONICAL_BOT_CHAT_TITLE,
   canonicalSessionCreateParams,
   canonicalSessionListParams
 } from '@/lib/bot-chat-canonical'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
-import { requestGatewayForAgent } from '@/store/gateway'
-import { $profiles, normalizeProfileKey } from '@/store/profile'
+import { activeGatewayConnectionId, requestGatewayForAgent, requestGatewayForProfile } from '@/store/gateway'
+import { normalizeProfileKey } from '@/store/profile'
 import { $connection, setSessionOwnerHint } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 
@@ -21,6 +20,8 @@ interface SessionCreateResponse {
   session_id?: string
   stored_session_id?: string
 }
+
+export const MANAGEMENT_REMOTE_CANONICAL_PROFILE = 'boss-bot'
 
 export interface ManagementCanonicalSession {
   route: SessionProfileRoute
@@ -44,83 +45,84 @@ export function hasConnectedRemoteGateway(): boolean {
   return Boolean(registry?.connections.some(connection => connection.kind !== 'local'))
 }
 
-export async function findRemoteRouteForProfile(profileName: string): Promise<DesktopPluginProfileRoute | null> {
-  const getProfileRoutes = window.hermesDesktop?.getProfileRoutes
-  if (!getProfileRoutes) {
-    return null
-  }
-
+/** Point Man management chat binds to the active/registered remote gateway directly. */
+export function resolveRemoteGatewayRoute(profileName: string): SessionProfileRoute | null {
   const key = normalizeProfileKey(profileName)
   if (!key || key === 'default') {
     return null
   }
 
-  let routes: DesktopPluginProfileRoute[]
-  try {
-    routes = await getProfileRoutes($profiles.get().map(profile => profile.name))
-  } catch {
-    return null
-  }
-
-  const remoteRoutes = routes.filter(route => {
-    if (route.mode !== 'remote') {
-      return false
+  const connection = $connection.get()
+  if (connection?.mode === 'remote') {
+    return {
+      connectionId: String(connection.connectionId ?? activeGatewayConnectionId() ?? '').trim(),
+      mode: 'remote',
+      profile: key,
+      targetProfile: key
     }
-
-    const routeProfile = normalizeProfileKey(route.profile)
-    const targetProfile = normalizeProfileKey(route.targetProfile)
-    return routeProfile === key || targetProfile === key
-  })
-
-  if (remoteRoutes.length === 0) {
-    return null
   }
 
   const registry = $connectionsRegistry.get()
-  if (registry) {
-    const registryMatch = remoteRoutes.find(route => {
-      const connection = registry.connections.find(entry => entry.id === route.connectionId)
-      return connection && connection.kind !== 'local'
-    })
-    if (registryMatch) {
-      return registryMatch
-    }
+  const remoteEntry = registry?.connections.find(entry => entry.kind !== 'local')
+  if (!remoteEntry) {
+    return null
   }
 
-  return remoteRoutes[0] ?? null
+  return {
+    connectionId: remoteEntry.id,
+    mode: 'remote',
+    profile: key,
+    targetProfile: key
+  }
 }
 
-export async function shouldUseManagementCanonicalChat(profileName: string): Promise<boolean> {
+export function shouldUseManagementCanonicalChat(profileName: string): boolean {
   if (!hasConnectedRemoteGateway()) {
     return false
   }
 
-  return (await findRemoteRouteForProfile(profileName)) !== null
+  return normalizeProfileKey(profileName) === MANAGEMENT_REMOTE_CANONICAL_PROFILE
 }
 
-function backendTargetProfile(route: DesktopPluginProfileRoute): string {
-  return normalizeProfileKey(route.targetProfile || route.profile)
+async function remoteGatewayRequest<T>(
+  route: SessionProfileRoute,
+  method: string,
+  params: Record<string, unknown>
+): Promise<T> {
+  const backendProfile = normalizeProfileKey(route.targetProfile || route.profile)
+
+  // App-global remote gateway: the active primary socket serves every profile.
+  if ($connection.get()?.mode === 'remote') {
+    return requestGatewayForProfile<T>(backendProfile, method, params)
+  }
+
+  if (route.connectionId) {
+    return requestGatewayForAgent<T>(route.connectionId, route.profile, method, params)
+  }
+
+  return requestGatewayForProfile<T>(backendProfile, method, params)
 }
 
 export async function resolveManagementCanonicalSession(
   profileName: string
 ): Promise<ManagementCanonicalSession | null> {
-  const route = await findRemoteRouteForProfile(profileName)
+  if (!shouldUseManagementCanonicalChat(profileName)) {
+    return null
+  }
+
+  const route = resolveRemoteGatewayRoute(profileName)
   if (!route) {
     return null
   }
 
-  const backendProfile = backendTargetProfile(route)
+  const backendProfile = normalizeProfileKey(route.targetProfile || route.profile)
   const ownerRoute: SessionProfileRoute = {
-    connectionId: route.connectionId,
-    mode: route.mode,
-    profile: normalizeProfileKey(route.profile),
+    ...route,
     targetProfile: backendProfile
   }
 
-  const listed = await requestGatewayForAgent<{ sessions?: SessionListRow[] }>(
-    route.connectionId,
-    route.profile,
+  const listed = await remoteGatewayRequest<{ sessions?: SessionListRow[] }>(
+    ownerRoute,
     'session.list',
     canonicalSessionListParams(backendProfile)
   )
@@ -131,9 +133,8 @@ export async function resolveManagementCanonicalSession(
     return { route: ownerRoute, storedSessionId }
   }
 
-  const created = await requestGatewayForAgent<SessionCreateResponse>(
-    route.connectionId,
-    route.profile,
+  const created = await remoteGatewayRequest<SessionCreateResponse>(
+    ownerRoute,
     'session.create',
     canonicalSessionCreateParams(backendProfile)
   )
@@ -144,6 +145,29 @@ export async function resolveManagementCanonicalSession(
   }
 
   return { route: ownerRoute, storedSessionId: createdStored }
+}
+
+export async function rebindManagementCanonicalOnResume(
+  profileName: string,
+  storedSessionId: string,
+  capturedOwner?: SessionProfileRoute
+): Promise<{ storedSessionId: string; owner?: SessionProfileRoute }> {
+  if (!shouldUseManagementCanonicalChat(profileName)) {
+    return { storedSessionId, owner: capturedOwner }
+  }
+
+  const canonical = await resolveManagementCanonicalSession(profileName)
+  if (!canonical) {
+    return { storedSessionId, owner: capturedOwner }
+  }
+
+  if (canonical.storedSessionId === storedSessionId) {
+    setSessionOwnerHint(storedSessionId, canonical.route)
+    return { storedSessionId, owner: capturedOwner ?? canonical.route }
+  }
+
+  setSessionOwnerHint(canonical.storedSessionId, canonical.route)
+  return { storedSessionId: canonical.storedSessionId, owner: canonical.route }
 }
 
 export async function openManagementCanonicalChat(

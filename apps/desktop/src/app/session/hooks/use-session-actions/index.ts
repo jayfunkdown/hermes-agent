@@ -29,7 +29,7 @@ import {
   retainGatewayForAgent
 } from '@/store/gateway'
 import { $gatewaySwitching } from '@/store/gateway-switch'
-import { resolveManagementCanonicalSession } from '@/store/management-canonical-chat'
+import { resolveManagementCanonicalSession, rebindManagementCanonicalOnResume } from '@/store/management-canonical-chat'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import {
@@ -804,7 +804,22 @@ export function useSessionActions({
   }, [navigate, selectedStoredSessionId])
 
   const resumeSession = useCallback(
-    async (storedSessionId: string, replaceRoute = false, capturedOwner?: SessionProfileRoute) => {
+    async (incomingStoredSessionId: string, replaceRoute = false, incomingOwner?: SessionProfileRoute) => {
+      let storedSessionId = incomingStoredSessionId
+      let capturedOwner = incomingOwner
+
+      try {
+        const rebound = await rebindManagementCanonicalOnResume(
+          normalizeProfileKey($activeGatewayProfile.get()),
+          storedSessionId,
+          capturedOwner
+        )
+        storedSessionId = rebound.storedSessionId
+        capturedOwner = rebound.owner
+      } catch (error) {
+        console.warn('[management-canonical] resume rebind failed', error)
+      }
+
       const requestId = resumeRequestRef.current + 1
       resumeRequestRef.current = requestId
       const resumedSameSelectedSession = selectedStoredSessionIdRef.current === storedSessionId

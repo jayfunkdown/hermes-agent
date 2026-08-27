@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const requestGatewayForAgent = vi.fn()
+const requestGatewayForProfile = vi.fn()
 
 vi.mock('@/store/gateway', () => ({
-  requestGatewayForAgent: (...args: unknown[]) => requestGatewayForAgent(...args)
+  activeGatewayConnectionId: vi.fn(() => 'ovh'),
+  requestGatewayForAgent: (...args: unknown[]) => requestGatewayForAgent(...args),
+  requestGatewayForProfile: (...args: unknown[]) => requestGatewayForProfile(...args)
 }))
 
 vi.mock('@/store/session', async importActual => {
@@ -16,62 +19,50 @@ vi.mock('@/store/session', async importActual => {
 
 const { $connectionsRegistry } = await import('@/store/connection-registry-state')
 const { $connection, setSessionOwnerHint } = await import('@/store/session')
-const { $profiles } = await import('@/store/profile')
 const {
-  findRemoteRouteForProfile,
   hasConnectedRemoteGateway,
   openManagementCanonicalChat,
+  rebindManagementCanonicalOnResume,
   resolveManagementCanonicalSession,
+  resolveRemoteGatewayRoute,
   shouldUseManagementCanonicalChat
 } = await import('./management-canonical-chat')
 
 describe('management-canonical-chat', () => {
   beforeEach(() => {
     requestGatewayForAgent.mockReset()
+    requestGatewayForProfile.mockReset()
     $connectionsRegistry.set({
       version: 2,
-      primary: 'local',
+      primary: 'ovh',
       secureTokenStorage: true,
       connections: [
         { id: 'local', kind: 'local', label: 'This device', tokenSet: false, tokenPreview: null },
         { id: 'ovh', kind: 'remote', label: 'OVH', tokenSet: true, tokenPreview: 'tok', url: 'https://ovh.example' }
       ]
     })
-    $connection.set({ mode: 'local' } as never)
-    $profiles.set([{ name: 'boss-bot' }, { name: 'default' }] as never)
+    $connection.set({ mode: 'remote', connectionId: 'ovh' } as never)
     ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
-      getProfileRoutes: vi.fn(async () => [
-        {
-          connectionId: 'local',
-          mode: 'local',
-          profile: 'boss-bot',
-          targetProfile: 'boss-bot'
-        },
-        {
-          connectionId: 'ovh',
-          mode: 'remote',
-          profile: 'boss-bot',
-          targetProfile: 'boss-bot'
-        }
-      ])
+      getProfileRoutes: vi.fn(async () => [])
     }
   })
 
-  it('detects a connected remote gateway from the registry', () => {
+  it('detects a connected remote gateway from the active connection', () => {
     expect(hasConnectedRemoteGateway()).toBe(true)
   })
 
-  it('prefers the remote route for a bot management profile', async () => {
-    const route = await findRemoteRouteForProfile('boss-bot')
-    expect(route).toEqual({
+  it('binds Point Man directly to the active remote gateway without per-profile routes', () => {
+    expect(resolveRemoteGatewayRoute('boss-bot')).toEqual({
       connectionId: 'ovh',
       mode: 'remote',
       profile: 'boss-bot',
       targetProfile: 'boss-bot'
     })
+    expect(shouldUseManagementCanonicalChat('boss-bot')).toBe(true)
   })
 
-  it('skips canonical resolution in pure local mode', async () => {
+  it('skips canonical resolution in pure local mode', () => {
+    $connection.set({ mode: 'local' } as never)
     $connectionsRegistry.set({
       version: 2,
       primary: 'local',
@@ -79,11 +70,11 @@ describe('management-canonical-chat', () => {
       connections: [{ id: 'local', kind: 'local', label: 'This device', tokenSet: false, tokenPreview: null }]
     })
 
-    await expect(shouldUseManagementCanonicalChat('boss-bot')).resolves.toBe(false)
+    expect(shouldUseManagementCanonicalChat('boss-bot')).toBe(false)
   })
 
-  it('adopts the remote canonical Bot Chat when it already exists', async () => {
-    requestGatewayForAgent.mockResolvedValueOnce({
+  it('resolves via active remote gateway when getProfileRoutes has no boss-bot entry', async () => {
+    requestGatewayForProfile.mockResolvedValueOnce({
       sessions: [{ id: 'cec445da', title: 'Bot Chat', root_title: 'Bot Chat' }]
     })
 
@@ -97,43 +88,75 @@ describe('management-canonical-chat', () => {
       },
       storedSessionId: 'cec445da'
     })
-    expect(requestGatewayForAgent).toHaveBeenCalledWith(
-      'ovh',
+    expect(requestGatewayForProfile).toHaveBeenCalledWith(
       'boss-bot',
       'session.list',
       expect.objectContaining({ title: 'Bot Chat', include_hidden: true, profile: 'boss-bot' })
     )
+    expect(requestGatewayForAgent).not.toHaveBeenCalled()
+  })
+
+  it('uses a registered secondary remote gateway when local is active', async () => {
+    $connection.set({ mode: 'local' } as never)
+    requestGatewayForAgent.mockResolvedValueOnce({
+      sessions: [{ id: 'cec445da', title: 'Bot Chat' }]
+    })
+
+    const resolved = await resolveManagementCanonicalSession('boss-bot')
+    expect(resolved?.storedSessionId).toBe('cec445da')
+    expect(requestGatewayForAgent).toHaveBeenCalledWith(
+      'ovh',
+      'boss-bot',
+      'session.list',
+      expect.objectContaining({ profile: 'boss-bot' })
+    )
   })
 
   it('creates the remote canonical Bot Chat when missing', async () => {
-    requestGatewayForAgent
+    requestGatewayForProfile
       .mockResolvedValueOnce({ sessions: [] })
       .mockResolvedValueOnce({ stored_session_id: 'new-canonical', session_id: 'runtime-1' })
 
     const resolved = await resolveManagementCanonicalSession('boss-bot')
     expect(resolved?.storedSessionId).toBe('new-canonical')
-    expect(requestGatewayForAgent).toHaveBeenLastCalledWith(
-      'ovh',
+    expect(requestGatewayForProfile).toHaveBeenLastCalledWith(
       'boss-bot',
       'session.create',
       expect.objectContaining({ title: 'Bot Chat', hidden: true, profile: 'boss-bot' })
     )
   })
 
-  it('opens the remote canonical session through resumeSession', async () => {
-    requestGatewayForAgent.mockResolvedValueOnce({
+  it('rebinds resume from a local stored id to the remote canonical session', async () => {
+    requestGatewayForProfile.mockResolvedValueOnce({
       sessions: [{ id: 'cec445da', title: 'Bot Chat' }]
     })
-    const resumeSession = vi.fn(async () => undefined)
 
-    const opened = await openManagementCanonicalChat('boss-bot', resumeSession)
-    expect(opened).toBe(true)
+    const rebound = await rebindManagementCanonicalOnResume('boss-bot', '20260823_022120_72b9ab')
+    expect(rebound).toEqual({
+      storedSessionId: 'cec445da',
+      owner: {
+        connectionId: 'ovh',
+        mode: 'remote',
+        profile: 'boss-bot',
+        targetProfile: 'boss-bot'
+      }
+    })
     expect(setSessionOwnerHint).toHaveBeenCalledWith('cec445da', {
       connectionId: 'ovh',
       mode: 'remote',
       profile: 'boss-bot',
       targetProfile: 'boss-bot'
     })
+  })
+
+  it('opens the remote canonical session through resumeSession', async () => {
+    requestGatewayForProfile.mockResolvedValueOnce({
+      sessions: [{ id: 'cec445da', title: 'Bot Chat' }]
+    })
+    const resumeSession = vi.fn(async () => undefined)
+
+    const opened = await openManagementCanonicalChat('boss-bot', resumeSession)
+    expect(opened).toBe(true)
     expect(resumeSession).toHaveBeenCalledWith('cec445da', false, {
       connectionId: 'ovh',
       mode: 'remote',
