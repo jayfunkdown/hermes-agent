@@ -6,6 +6,10 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
 import { AuthWidget } from "@/components/AuthWidget";
 import { Markdown } from "@/components/Markdown";
+import {
+  AgentDeliveryNotice,
+  AgentDeliveryToolNotice,
+} from "@/components/mobile/AgentDeliveryNotice";
 import { MobileBotRow } from "@/components/mobile/MobileBotRow";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -22,6 +26,7 @@ import {
   botRosterMeta,
   type MobileBotRow as MobileBot,
 } from "@/lib/mobile-bot-roster";
+import { renderMobileSessionMessages } from "@/lib/mobile-agent-delivery-render";
 import { GatewayClient } from "@/lib/gatewayClient";
 import {
   latestMessageId,
@@ -211,6 +216,8 @@ export default function MobileMirrorPage() {
     selectedSessionId,
     scopedProfile || "",
   );
+
+  const renderedMessages = useMemo(() => renderMobileSessionMessages(messages), [messages]);
 
   const filteredBots = useMemo(() => {
     const needle = hubQuery.trim().toLowerCase();
@@ -563,15 +570,35 @@ export default function MobileMirrorPage() {
                 </div>
               ) : (
                 <div className="flex flex-col gap-2 pb-4">
-                  {messages.map((message) => (
-                    <ChatBubble
-                      key={
-                        message.id ??
-                        `${message.role}-${message.timestamp ?? ""}-${message.tool_call_id ?? ""}`
-                      }
-                      message={message}
-                    />
-                  ))}
+                  {renderedMessages.map((item) => {
+                    if (item.kind === "agent-receive") {
+                      return (
+                        <AgentDeliveryNotice
+                          key={item.key}
+                          sender={item.parsed.sender}
+                          handle={item.parsed.handle}
+                          body={item.parsed.body}
+                          gateway={gateway}
+                          rosterAvatars={avatars}
+                          bots={bots}
+                        />
+                      );
+                    }
+                    if (item.kind === "agent-send") {
+                      return (
+                        <AgentDeliveryToolNotice
+                          key={item.key}
+                          target={item.delivery.target}
+                          pending={item.delivery.pending}
+                          replyBody={item.delivery.replyBody}
+                          gateway={gateway}
+                          rosterAvatars={avatars}
+                          bots={bots}
+                        />
+                      );
+                    }
+                    return <ChatBubble key={item.key} message={item.message} />;
+                  })}
                   {activities.map((item) => (
                     <ActivityBubble key={item.id} label={item.label} />
                   ))}
