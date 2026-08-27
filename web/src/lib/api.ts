@@ -390,6 +390,32 @@ export const api = {
         profile,
       ),
     ),
+  getSessionMessagesSince: (
+    id: string,
+    afterId: number,
+    profile = getManagementProfile(),
+    ifRevision?: number,
+  ) => {
+    const query = new URLSearchParams({ after_id: String(afterId) });
+    if (ifRevision !== undefined) {
+      query.set("if_revision", String(ifRevision));
+    }
+    return fetchJSON<SessionMessagesResponse>(
+      appendProfileParam(
+        `/api/sessions/${encodeURIComponent(id)}/messages?${query.toString()}`,
+        profile,
+      ),
+    );
+  },
+  getSessionEventsUrl: (
+    id: string,
+    profile = getManagementProfile(),
+    afterId = 0,
+  ) =>
+    appendProfileParam(
+      `/api/sessions/${encodeURIComponent(id)}/events?after_id=${afterId}`,
+      profile,
+    ),
   getSessionDetail: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionInfo>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
@@ -2036,6 +2062,7 @@ export interface WhatsAppOnboardingApplyResponse {
 }
 
 export interface SessionMessage {
+  id?: number;
   role: "user" | "assistant" | "system" | "tool";
   content: string | null;
   tool_calls?: Array<{
@@ -2045,6 +2072,10 @@ export interface SessionMessage {
   tool_name?: string;
   tool_call_id?: string;
   timestamp?: number;
+  display_kind?: string | null;
+  display_metadata?: Record<string, unknown> | null;
+  active?: boolean;
+  compacted?: boolean;
 }
 
 export interface SessionMessagesResponse {

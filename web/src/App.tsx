@@ -96,6 +96,7 @@ const ChannelsPage = lazy(() => import("@/pages/ChannelsPage"));
 const WebhooksPage = lazy(() => import("@/pages/WebhooksPage"));
 const SystemPage = lazy(() => import("@/pages/SystemPage"));
 const ChatPage = lazy(() => import("@/pages/ChatPage"));
+const MobileMirrorPage = lazy(() => import("@/pages/MobileMirrorPage"));
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -400,6 +401,7 @@ export default function App() {
   const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
+  const isMobileMirrorRoute = normalizedPath === "/mobile";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
   // Defer mounting the persistent chat host (and its xterm chunk) until the
   // user has actually opened /chat at least once. Sticky after that so the
@@ -508,6 +510,16 @@ export default function App() {
     mql.addEventListener("change", onChange);
     return () => mql.removeEventListener("change", onChange);
   }, []);
+
+  if (isMobileMirrorRoute) {
+    return (
+      <ProfileProvider>
+        <Suspense fallback={<RouteFallback label="Loading mobile shell…" />}>
+          <MobileMirrorPage />
+        </Suspense>
+      </ProfileProvider>
+    );
+  }
 
   return (
     <ProfileProvider>
