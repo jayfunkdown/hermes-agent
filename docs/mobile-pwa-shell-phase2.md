@@ -1,22 +1,49 @@
-# Hermes Mobile Mirror — Phase 2 PWA shell
+# Hermes Mobile Mirror — Phase 3 message endpoint
 
-Branch: `cursor/mobile-pwa-shell-40a1`
+Branch: `cursor/mobile-send-endpoint-40a1`
 
-What this adds:
-- A standalone mobile-first route at `/mobile` that works in a browser tab and as an installed PWA.
-- Active-profile session list with most-recently-active default selection.
-- Transcript loading for any session id, live SSE sync, and delta catch-up via `after_id` without duplicate rows.
-- Composer submit backed by the existing gateway/session transport.
-- Clean message bubbles with collapsible tool output and mobile-friendly fallback rendering for long artifact/file content.
-- Manifest + service worker registration for installability.
+## Endpoint
 
-Auth and scope:
-- Reuses the existing dashboard auth/session gate.
-- Does not expose the OpenAI-compatible API server.
-- Does not add terminal/tool endpoints to the phone surface.
-- Does not change model/provider selection.
+```http
+POST /api/sessions/{session_id}/messages
+Content-Type: application/json
 
-Verification targets:
-- `tests/hermes_cli/test_session_sync.py`
-- `web/src/lib/mobile-session-sync.test.ts`
-- `web` typecheck / unit tests / build
+{"text":"hello from the phone"}
+```
+
+The existing dashboard auth gate applies (session cookie in gated mode or
+`X-Hermes-Session-Token` in loopback mode). The endpoint accepts only a
+non-empty string up to 20,000 characters and returns `202`-style acceptance:
+
+```json
+{"ok":true,"accepted":true,"session_id":"..."}
+```
+
+Requests are scoped to a live session and limited to 20 messages per client IP
+per 60 seconds. Expired/revoked dashboard sessions are rejected by the normal
+auth middleware; session revocation is performed through the existing Hermes
+logout/session revocation path. The gateway's `prompt.submit` transport handles
+the message; input is never executed as a shell command.
+
+## Safety boundary
+
+The route does not expose `/api/pty`, `/api/console`, shell, tool, or provider
+endpoints. It forwards plain text only to the existing authenticated gateway
+RPC and uses a sink transport for asynchronous gateway frames; message and SSE
+clients receive results through the Phase 1 session store/event stream.
+
+## Phase 2 features retained
+
+- Active-profile session list and responsive Hermes dashboard styling.
+- Delta catch-up via `after_id`, SSE reconnect, and ID deduplication.
+- Collapsible tool output and installable manifest/service worker.
+
+## Verification
+
+```bash
+pytest tests/hermes_cli/test_session_sync.py tests/test_mobile_send_endpoint.py -q
+npm run typecheck -w web
+npm test -w web
+npm run build -w web
+npm run lint -w web
+```

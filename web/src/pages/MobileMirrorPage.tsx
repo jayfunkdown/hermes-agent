@@ -10,7 +10,6 @@ import { Markdown } from "@/components/Markdown";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { api, authedFetch, type SessionInfo, type SessionMessage } from "@/lib/api";
-import { GatewayClient } from "@/lib/gatewayClient";
 import {
   latestMessageId,
   mergeSessionMessages,
@@ -222,29 +221,6 @@ function MobileMessageBubble({ message }: { message: SessionMessage }) {
       )}
     </article>
   );
-}
-
-async function sendSessionPrompt(
-  storedSessionId: string,
-  text: string,
-  profile?: string,
-): Promise<void> {
-  const gateway = new GatewayClient();
-  try {
-    await gateway.connect();
-    const resumed = await gateway.request<{ session_id: string }>("session.resume", {
-      session_id: storedSessionId,
-      omit_messages: true,
-      defer_history: true,
-      ...(profile ? { profile } : {}),
-    });
-    await gateway.request("prompt.submit", {
-      session_id: resumed.session_id,
-      text,
-    });
-  } finally {
-    gateway.close();
-  }
 }
 
 export default function MobileMirrorPage() {
@@ -506,7 +482,7 @@ export default function MobileMirrorPage() {
     setSendBusy(true);
     try {
       setComposer("");
-      await sendSessionPrompt(selectedSessionId, text, profile || undefined);
+      await api.submitSessionMessage(selectedSessionId, text, profile || "");
     } catch (error) {
       setStreamNote(error instanceof Error ? error.message : String(error));
       setStreamStatus("error");
@@ -634,7 +610,7 @@ export default function MobileMirrorPage() {
               </div>
             ) : (
               <div className="flex flex-col gap-3 pb-4">
-                {messages.map((message) => (
+                {messages.map((message, index) => (
                   <MobileMessageBubble
                     key={
                       message.id ??

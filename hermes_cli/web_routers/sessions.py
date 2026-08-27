@@ -16,6 +16,8 @@ import asyncio  # noqa: F401 — used by handlers
 import json
 import logging
 import time  # noqa: F401
+import threading
+import uuid
 from typing import Any, Dict, List, Optional  # noqa: F401
 
 from fastapi import APIRouter, HTTPException, Query, Request  # noqa: F401
@@ -36,6 +38,19 @@ _log = logging.getLogger("hermes_cli.web_server")
 list_router = APIRouter()
 search_router = APIRouter()
 manage_router = APIRouter()
+
+_MOBILE_SEND_WINDOW_S = 60.0
+_MOBILE_SEND_MAX = 20
+_mobile_send_history: dict[str, list[float]] = {}
+_mobile_send_lock = threading.Lock()
+
+
+class _MobilePromptTransport:
+    def write(self, obj: dict) -> bool:
+        return True
+
+    def close(self) -> None:
+        return None
 
 # Late-bound web_server helpers (resolved at call time; cycle-safe,
 # monkeypatch-transparent).
@@ -596,6 +611,38 @@ async def get_session_latest_descendant(
         "path": path,
         "changed": bool(path and latest != path[0]),
     }
+
+
+@manage_router.post("/api/sessions/{session_id}/messages")
+async def submit_session_message(session_id: str, request: Request):
+    """Submit plain text through the authenticated gateway RPC path."""
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="request body must be JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+        raise HTTPException(status_code=422, detail="text must be a string")
+    text = payload["text"].strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text must not be empty")
+    if len(text) > 20_000:
+        raise HTTPException(status_code=413, detail="text exceeds 20000 characters")
+    now = time.monotonic()
+    client_key = request.client.host if request.client else "unknown"
+    with _mobile_send_lock:
+        recent = [stamp for stamp in _mobile_send_history.get(client_key, []) if now - stamp < _MOBILE_SEND_WINDOW_S]
+        if len(recent) >= _MOBILE_SEND_MAX:
+            raise HTTPException(status_code=429, detail="mobile message rate limit exceeded")
+        recent.append(now)
+        _mobile_send_history[client_key] = recent
+    from tui_gateway import server
+    if session_id not in server._sessions:
+        raise HTTPException(status_code=404, detail="live session not found")
+    rpc = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": "prompt.submit", "params": {"session_id": session_id, "text": text}}
+    response = await asyncio.to_thread(server.dispatch, rpc, _MobilePromptTransport())
+    if isinstance(response, dict) and response.get("error"):
+        raise HTTPException(status_code=409, detail=response["error"].get("message", "session rejected prompt"))
+    return {"ok": True, "session_id": session_id, "accepted": True}
 
 
 @manage_router.get("/api/sessions/{session_id}/messages")
