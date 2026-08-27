@@ -610,7 +610,7 @@ export default function MobileMirrorPage() {
               </div>
             ) : (
               <div className="flex flex-col gap-3 pb-4">
-                {messages.map((message, index) => (
+                {messages.map((message) => (
                   <MobileMessageBubble
                     key={
                       message.id ??
