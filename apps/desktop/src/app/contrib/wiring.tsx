@@ -43,6 +43,7 @@ import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
 import { $activeConnectionId } from '@/store/connections'
+import { openManagementCanonicalChat } from '@/store/management-canonical-chat'
 import { $cronReviewRequest, setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { notify, notifyError } from '@/store/notifications'
@@ -50,6 +51,7 @@ import { $previewTarget } from '@/store/preview'
 import {
   $activeGatewayProfile,
   $freshSessionRequest,
+  $newChatProfile,
   $profileScope,
   ALL_PROFILES,
   ensureGatewayProfile,
@@ -516,8 +518,21 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     }
 
     lastFreshRef.current = freshSessionRequest
-    startFreshSessionDraft()
-  }, [freshSessionRequest, startFreshSessionDraft])
+
+    void (async () => {
+      const profile = normalizeProfileKey($newChatProfile.get() || $activeGatewayProfile.get())
+      try {
+        const opened = await openManagementCanonicalChat(profile, resumeSession)
+        if (opened) {
+          return
+        }
+      } catch (error) {
+        console.warn('[management-canonical] failed to open remote canonical chat', error)
+      }
+
+      startFreshSessionDraft()
+    })()
+  }, [freshSessionRequest, resumeSession, startFreshSessionDraft])
 
   // Swapping the live gateway to another source or profile must re-pull that
   // source's model/config/profile state. Two sources commonly both expose a

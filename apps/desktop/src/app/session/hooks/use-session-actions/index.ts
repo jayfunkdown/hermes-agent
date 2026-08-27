@@ -29,6 +29,7 @@ import {
   retainGatewayForAgent
 } from '@/store/gateway'
 import { $gatewaySwitching } from '@/store/gateway-switch'
+import { resolveManagementCanonicalSession } from '@/store/management-canonical-chat'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import {
@@ -311,6 +312,9 @@ export function useSessionActions({
   const { t } = useI18n()
   const copy = t.desktop
   const resumeRequestRef = useRef(0)
+  const resumeSessionRef = useRef<
+    ((storedSessionId: string, replaceRoute?: boolean, capturedOwner?: SessionProfileRoute) => Promise<unknown>) | null
+  >(null)
 
   // Follow auto-compression's stored-id rotation only while the exact runtime,
   // selection, and route intent still belong to the rotating conversation.
@@ -489,6 +493,19 @@ export function useSessionActions({
         // reduce the owner to a bare profile name that later RPCs dial on a
         // different socket than the one that minted the runtime.
         const capturedRoute = resolveNewChatOwnerRoute()
+        const profile = normalizeProfileKey(
+          capturedRoute?.profile || $newChatProfile.get() || $activeGatewayProfile.get()
+        )
+
+        if (!capturedRoute) {
+          const canonical = await resolveManagementCanonicalSession(profile)
+          const resume = resumeSessionRef.current
+          if (canonical && resume) {
+            await resume(canonical.storedSessionId, false, canonical.route)
+            return canonical.storedSessionId
+          }
+        }
+
         const params = await desktopSessionCreateParams(cwd, capturedRoute)
 
         // Lease the owner socket for the whole create → owner-publication
@@ -1804,6 +1821,8 @@ export function useSessionActions({
       updateSessionState
     ]
   )
+
+  resumeSessionRef.current = resumeSession
 
   // Shared fork: create a child session seeded with `branchMessages`, linked to
   // `parentStoredId` so it nests under its parent, then open it as its own tab
