@@ -10,7 +10,6 @@ import { Markdown } from "@/components/Markdown";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { api, authedFetch, type SessionInfo, type SessionMessage } from "@/lib/api";
-import { GatewayClient } from "@/lib/gatewayClient";
 import {
   latestMessageId,
   mergeSessionMessages,
@@ -222,16 +221,6 @@ function MobileMessageBubble({ message }: { message: SessionMessage }) {
       )}
     </article>
   );
-}
-
-async function sendSessionPrompt(sessionId: string, text: string): Promise<void> {
-  const gateway = new GatewayClient();
-  try {
-    await gateway.connect();
-    await gateway.request("prompt.submit", { session_id: sessionId, text });
-  } finally {
-    gateway.close();
-  }
 }
 
 export default function MobileMirrorPage() {
@@ -486,14 +475,14 @@ export default function MobileMirrorPage() {
     setSendBusy(true);
     try {
       setComposer("");
-      await sendSessionPrompt(selectedSessionId, text);
+      await api.submitSessionMessage(selectedSessionId, text, profile || "");
     } catch (error) {
       setStreamNote(error instanceof Error ? error.message : String(error));
       setStreamStatus("error");
     } finally {
       setSendBusy(false);
     }
-  }, [composer, sendBusy, selectedSessionId]);
+  }, [composer, profile, sendBusy, selectedSessionId]);
 
   const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy;
 
@@ -614,9 +603,9 @@ export default function MobileMirrorPage() {
               </div>
             ) : (
               <div className="flex flex-col gap-3 pb-4">
-                {messages.map((message) => (
+                {messages.map((message, index) => (
                   <MobileMessageBubble
-                    key={message.id ?? `${message.role}-${message.timestamp ?? Math.random()}`}
+                    key={message.id ?? `${message.role}-${message.timestamp ?? "unknown"}-${index}`}
                     message={message}
                   />
                 ))}

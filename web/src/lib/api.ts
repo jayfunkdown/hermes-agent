@@ -416,6 +416,15 @@ export const api = {
       `/api/sessions/${encodeURIComponent(id)}/events?after_id=${afterId}`,
       profile,
     ),
+  submitSessionMessage: (id: string, text: string, profile = getManagementProfile()) =>
+    fetchJSON<{ ok: boolean; accepted: boolean; session_id: string }>(
+      appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/messages`, profile),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      },
+    ),
   getSessionDetail: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionInfo>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
