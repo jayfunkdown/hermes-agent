@@ -241,6 +241,7 @@ export default function MobileMirrorPage() {
   const [sendBusy, setSendBusy] = useState(false);
 
   const selectedSessionRef = useRef(selectedSessionId);
+  const resolvedSessionIdRef = useRef("");
   const cursorRef = useRef(0);
   const statusAbortRef = useRef<AbortController | null>(null);
   const streamRunRef = useRef(0);
@@ -264,6 +265,26 @@ export default function MobileMirrorPage() {
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
   }, [selectedSessionId]);
+
+  const applyMessageDelta = useCallback(
+    async (sessionId: string, afterId: number, profileName: string) => {
+      const next = await api.getSessionMessagesSince(sessionId, afterId, profileName);
+      const incoming = next.messages ?? [];
+      if (incoming.length === 0) {
+        const revision = next.latest_message_id ?? next.revision ?? afterId;
+        if (revision > cursorRef.current) {
+          cursorRef.current = revision;
+        }
+        return;
+      }
+      setMessages((prev) => {
+        const merged = mergeSessionMessages(prev, incoming);
+        cursorRef.current = latestMessageId(merged);
+        return merged;
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -310,6 +331,7 @@ export default function MobileMirrorPage() {
     const sessionId = selectedSessionId.trim();
 
     if (!sessionId) {
+      resolvedSessionIdRef.current = "";
       setMessages([]);
       setMessagesLoading(false);
       setStreamStatus("idle");
@@ -346,31 +368,15 @@ export default function MobileMirrorPage() {
       const initialMessages = response.messages ?? [];
       setMessages(initialMessages);
       cursorRef.current = latestMessageId(initialMessages);
+      resolvedSessionIdRef.current = resolvedSessionId;
       setMessagesLoading(false);
       setStreamStatus("live");
       return resolvedSessionId;
     };
 
     const syncDelta = async (resolvedSessionId: string, afterId: number) => {
-      const next = await api.getSessionMessagesSince(
-        resolvedSessionId,
-        afterId,
-        profile || "",
-      );
       if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
-      const incoming = next.messages ?? [];
-      if (incoming.length === 0) {
-        const revision = next.latest_message_id ?? next.revision ?? afterId;
-        if (revision > cursorRef.current) {
-          cursorRef.current = revision;
-        }
-        return;
-      }
-      setMessages((prev) => {
-        const merged = mergeSessionMessages(prev, incoming);
-        cursorRef.current = latestMessageId(merged);
-        return merged;
-      });
+      await applyMessageDelta(resolvedSessionId, afterId, profile || "");
     };
 
     const catchUpFromEvent = async (event: SessionStreamEvent, resolvedSessionId: string) => {
@@ -443,7 +449,7 @@ export default function MobileMirrorPage() {
       cancelled = true;
       controller.abort();
     };
-  }, [profile, selectedSessionId, setSearchParams]);
+  }, [applyMessageDelta, profile, selectedSessionId, setSearchParams]);
 
   useEffect(() => {
     const title = activeSession ? `${sessionDisplayLabel(activeSession)} · Hermes Mobile` : "Hermes Mobile";
@@ -482,14 +488,29 @@ export default function MobileMirrorPage() {
     setSendBusy(true);
     try {
       setComposer("");
-      await api.submitSessionMessage(selectedSessionId, text, profile || "");
+      const result = await api.submitSessionMessage(selectedSessionId, text, profile || "");
+      const targetSessionId =
+        result.session_id || resolvedSessionIdRef.current || selectedSessionId;
+      if (targetSessionId !== selectedSessionRef.current) {
+        return;
+      }
+      await applyMessageDelta(targetSessionId, cursorRef.current, profile || "");
+      if (targetSessionId !== selectedSessionId) {
+        resolvedSessionIdRef.current = targetSessionId;
+        setSelectedSessionId(targetSessionId);
+        setSearchParams((prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("session", targetSessionId);
+          return next;
+        }, { replace: true });
+      }
     } catch (error) {
       setStreamNote(error instanceof Error ? error.message : String(error));
       setStreamStatus("error");
     } finally {
       setSendBusy(false);
     }
-  }, [composer, profile, sendBusy, selectedSessionId]);
+  }, [applyMessageDelta, composer, profile, sendBusy, selectedSessionId, setSearchParams]);
 
   const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy;
 
