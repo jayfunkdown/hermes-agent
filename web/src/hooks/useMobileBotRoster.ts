@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, type SessionMessage } from "@/lib/api";
+import {
+  canonicalSessionCreateParams,
+  canonicalSessionListParams,
+} from "@/lib/bot-chat-canonical";
 import type { GatewayClient } from "@/lib/gatewayClient";
 import type { GatewayEvent } from "@hermes/shared";
 import {
   activityLabelForGatewayEvent,
   BOT_ROSTER_POLL_MS,
   bumpBotInRoster,
-  CANONICAL_CHAT_TITLE,
   mergeRosterWithLocalBumps,
   pruneCaughtUpRosterBumps,
   rosterDefaultOnlyWarning,
@@ -250,25 +253,19 @@ export async function ensureCanonicalChat(
   gateway: GatewayClient,
   profileName: string,
 ): Promise<string> {
-  const profile = profileName.trim() || undefined;
   const listed = await gateway.request<{ sessions?: Array<{ id: string; resolved_id?: string }> }>(
     "session.list",
-    {
-      ...(profile ? { profile } : {}),
-      title: CANONICAL_CHAT_TITLE,
-      include_hidden: true,
-    },
+    canonicalSessionListParams(profileName),
   );
   const existing = listed.sessions?.[0];
   const sessionId = existing?.resolved_id || existing?.id;
   if (sessionId) {
     return sessionId;
   }
-  const created = await gateway.request<{ session_id: string }>("session.create", {
-    ...(profile ? { profile } : {}),
-    title: CANONICAL_CHAT_TITLE,
-    hidden: true,
-  });
+  const created = await gateway.request<{ session_id: string }>(
+    "session.create",
+    canonicalSessionCreateParams(profileName),
+  );
   return created.session_id;
 }
 

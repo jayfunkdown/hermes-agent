@@ -1,11 +1,12 @@
 import { profileColor } from "@/lib/profile-color";
 import type { SessionMessage } from "@/lib/api";
+import { CANONICAL_BOT_CHAT_TITLE } from "@/lib/bot-chat-canonical";
 import { activityLabelForGatewayEvent } from "@/lib/mobile-activity-notices";
 import { countPersistedMessages, previewFromMessages } from "@/lib/mobile-session-sync";
 
 export { activityLabelForGatewayEvent };
 
-export const CANONICAL_CHAT_TITLE = "Bot Chat";
+export const CANONICAL_CHAT_TITLE = CANONICAL_BOT_CHAT_TITLE;
 export const ACTIVE_WINDOW_S = 90;
 export const WORKER_ACTIVE_WINDOW_S = 150;
 export const BOT_ROSTER_POLL_MS = 5_000;
