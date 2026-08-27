@@ -684,6 +684,16 @@ export const api = {
   // Profiles
   getProfiles: () =>
     fetchJSON<{ profiles: ProfileInfo[] }>("/api/profiles"),
+  /** Desktop-parity Bot Mode roster for `/mobile` (list_profiles + ui_meta + canonical_session). */
+  getMobileRoster: (includeSessions = true) =>
+    fetchJSON<{
+      profiles: Array<Record<string, unknown>>;
+      default_only?: boolean;
+      incomplete?: boolean;
+      profile_count?: number;
+      source?: string;
+      bot_mode_protocol?: boolean;
+    }>(`/api/mobile/roster?include_sessions=${includeSessions ? "true" : "false"}`),
   getActiveProfile: () =>
     fetchJSON<ActiveProfileInfo>("/api/profiles/active"),
   setActiveProfile: (name: string) =>
@@ -2090,8 +2100,11 @@ export interface SessionMessage {
 export interface SessionMessagesResponse {
   session_id: string;
   messages: SessionMessage[];
+  /** Max message row id for this session (cursor / freshness watermark). */
   revision?: number;
+  /** Alias of revision; preferred by mobile delta/SSE clients. */
   latest_message_id?: number;
+  /** True when if_revision matched and no new messages were returned. */
   unchanged?: boolean;
   pagination?: {
     limit: number;

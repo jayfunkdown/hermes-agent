@@ -18037,7 +18037,14 @@ def mount_spa(application: FastAPI):
             and file_path.exists()
             and file_path.is_file()
         ):
-            return FileResponse(file_path)
+            # Service worker + webmanifest must never be HTTP-cached: phones
+            # otherwise keep a stale SW that serves an old mobile shell after
+            # deploy (Jason's /mobile "no change" failure class).
+            headers = None
+            lower_name = file_path.name.lower()
+            if lower_name in {"sw.js", "service-worker.js", "manifest.webmanifest"}:
+                headers = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+            return FileResponse(file_path, headers=headers)
         return _serve_index(prefix)
 
 

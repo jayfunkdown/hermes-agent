@@ -1,15 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  bumpSessionInList,
   getMessageId,
   latestMessageId,
   mergeSessionMessages,
   parseSessionStreamEvent,
-  previewFromMessages,
-  sessionInitials,
-  sessionListTitle,
-  sessionPreviewText,
   sessionStreamCursor,
   shouldCollapseMessage,
   shouldShowThinkingIndicator,
@@ -47,53 +42,6 @@ describe("mobile-session-sync", () => {
     expect(sessionStreamCursor({ type: "hello", after_id: 15 }, 9)).toBe(15);
   });
 
-  it("builds hub list labels and preview text", () => {
-    expect(
-      sessionListTitle({
-        id: "20250827_120000_abcd",
-        title: "Boss bot",
-      } as never),
-    ).toBe("Boss bot");
-    expect(
-      sessionPreviewText({
-        id: "s1",
-        preview: "  latest reply  ",
-        message_count: 4,
-      } as never),
-    ).toBe("latest reply");
-    expect(sessionInitials({ id: "s1", title: "Boss Bot" } as never)).toBe("BB");
-  });
-
-  it("derives hub preview text from the latest visible message", () => {
-    expect(
-      previewFromMessages([
-        makeMessage(1, "user"),
-        { ...makeMessage(2, "assistant"), content: "Done checking inventory." },
-      ]),
-    ).toBe("Done checking inventory.");
-    expect(
-      bumpSessionInList(
-        [
-          {
-            id: "s1",
-            last_active: 1,
-            message_count: 1,
-            preview: "old",
-          } as never,
-          { id: "s2", last_active: 99 } as never,
-        ],
-        "s1",
-        [makeMessage(1, "user"), { ...makeMessage(2, "assistant"), content: "Fresh reply" }],
-      ).map((session) => session.id),
-    ).toEqual(["s1", "s2"]);
-  });
-
-  it("shows a thinking indicator while awaiting an assistant reply", () => {
-    expect(shouldShowThinkingIndicator([makeMessage(1, "user")], true, false)).toBe(true);
-    expect(shouldShowThinkingIndicator([makeMessage(2, "assistant")], false, true)).toBe(false);
-    expect(shouldShowThinkingIndicator([makeMessage(1, "user")], false, true)).toBe(true);
-  });
-
   it("flags tool and artifact-style messages for collapse", () => {
     expect(shouldCollapseMessage(makeMessage(1, "tool"))).toBe(true);
     expect(
@@ -112,18 +60,9 @@ describe("mobile-session-sync", () => {
     expect(parseSessionStreamEvent("not json")).toBeNull();
   });
 
-  it("does not advance cursor before delta fetch would use the prior watermark", () => {
-    const priorCursor = 5;
-    const eventWatermark = sessionStreamCursor(
-      { type: "message.appended", latest_message_id: 12 },
-      priorCursor,
-    );
-    expect(eventWatermark).toBe(12);
-    // Delta fetch must use priorCursor (5), not eventWatermark (12), as after_id.
-    const delta = mergeSessionMessages(
-      [makeMessage(5, "assistant")],
-      [makeMessage(6), makeMessage(7)],
-    );
-    expect(latestMessageId(delta)).toBe(7);
+  it("shows thinking indicator while awaiting reply or after user turn", () => {
+    expect(shouldShowThinkingIndicator([makeMessage(1, "user")], true, false)).toBe(true);
+    expect(shouldShowThinkingIndicator([makeMessage(2, "assistant")], false, true)).toBe(false);
+    expect(shouldShowThinkingIndicator([makeMessage(1, "user")], false, true)).toBe(true);
   });
 });

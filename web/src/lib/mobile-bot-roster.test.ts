@@ -5,13 +5,17 @@ import {
   botHandle,
   botMood,
   botRowPreview,
-  bumpBotInRoster,
   canonicalChatSessionId,
   displayName,
-  mergeRosterWithLocalBumps,
-  partitionBotsForHub,
-  pruneCaughtUpRosterBumps,
+  formatMobileError,
+  isBotHidden,
+  isSessionNotFoundError,
+  rosterDefaultOnlyWarning,
+  rosterLoadIncomplete,
+  rosterOnlyDefault,
+  rosterOnlyHiddenDefault,
   sortBotsForHub,
+  splitRosterByHidden,
   stripAgentPreview,
   type MobileBotRow,
 } from "@/lib/mobile-bot-roster";
@@ -21,6 +25,25 @@ function bot(overrides: Partial<MobileBotRow> = {}): MobileBotRow {
     name: "alpha",
     ...overrides,
   };
+}
+
+function jasonScenario(): MobileBotRow[] {
+  return [
+    bot({
+      name: "default",
+      ui_meta: { "hermes-bots": { title: "Hermes", hidden: true } },
+      canonical_session: { id: "stale-default", last_active: 1, preview: "OK" },
+    }),
+    bot({
+      name: "boss-bot",
+      ui_meta: { "hermes-bots": { title: "Point man" } },
+      canonical_session: { id: "boss-chat", last_active: 100 },
+    }),
+    bot({ name: "dev", canonical_session: { id: "dev-chat", last_active: 90 } }),
+    bot({ name: "bsv-ops", canonical_session: { id: "bsv-chat", last_active: 80 } }),
+    bot({ name: "assistant", canonical_session: { id: "asst-chat", last_active: 70 } }),
+    bot({ name: "mainline", canonical_session: { id: "main-chat", last_active: 60 } }),
+  ];
 }
 
 describe("mobile-bot-roster", () => {
@@ -65,73 +88,63 @@ describe("mobile-bot-roster", () => {
     expect(rows.map((row) => row.name)).toEqual(["pinned", "recent"]);
   });
 
-  it("partitions hidden bots into a recoverable hidden section", () => {
-    const rows = partitionBotsForHub([
-      bot({ name: "alpha" }),
-      bot({ name: "ghost", ui_meta: { "hermes-bots": { hidden: true } } }),
-    ]);
-    expect(rows.visible.map((row) => row.name)).toEqual(["alpha"]);
-    expect(rows.hidden.map((row) => row.name)).toEqual(["ghost"]);
-    expect(rows.hiddenCount).toBe(1);
-  });
-
-  it("filters hidden and visible bots together when searching", () => {
-    const rows = partitionBotsForHub(
-      [
-        bot({ name: "alpha", ui_meta: { "hermes-bots": { title: "Alpha" } } }),
-        bot({ name: "ghost", ui_meta: { "hermes-bots": { hidden: true, title: "Ghost" } } }),
-      ],
-      "ghost",
-    );
-    expect(rows.visible).toHaveLength(0);
-    expect(rows.hidden.map((row) => row.name)).toEqual(["ghost"]);
-  });
-
-  it("bumps canonical session preview locally before the next profiles.list poll", () => {
-    const { bots: bumped, bump } = bumpBotInRoster(
-      [
-        bot({
-          name: "dev",
-          canonical_session: { id: "chat-1", last_active: 10, preview: "old" },
-        }),
-      ],
-      "dev",
-      [{ id: 2, role: "assistant", content: "fresh reply" }],
-    );
-    expect(bump?.preview).toBe("fresh reply");
-    expect(bumped[0]?.canonical_session?.preview).toBe("fresh reply");
-    expect((bumped[0]?.canonical_session?.last_active || 0) > 10).toBe(true);
-  });
-
-  it("keeps local bumps across unchanged server snapshots until the server catches up", () => {
-    const bumps = new Map([
-      ["dev", { last_active: 500, preview: "local preview" }],
-    ]);
-    const merged = mergeRosterWithLocalBumps(
-      [
-        bot({
-          name: "dev",
-          canonical_session: { id: "chat-1", last_active: 100, preview: "stale server" },
-        }),
-      ],
-      bumps,
-    );
-    expect(merged[0]?.canonical_session?.preview).toBe("local preview");
-    pruneCaughtUpRosterBumps(
-      [
-        bot({
-          name: "dev",
-          canonical_session: { id: "chat-1", last_active: 600, preview: "server caught up" },
-        }),
-      ],
-      bumps,
-    );
-    expect(bumps.size).toBe(0);
-  });
-
   it("maps gateway activity events to labels", () => {
     expect(activityLabelForGatewayEvent("tool.start", { name: "memory" })).toBe("Running memory");
     expect(activityLabelForGatewayEvent("tool.generating", { name: "reply" })).toBe("Drafting reply…");
     expect(activityLabelForGatewayEvent("status.update", { message: "Writing memory…" })).toBe("Writing memory…");
+  });
+
+  it("reads hidden flag from ui_meta hermes-bots (desktop parity)", () => {
+    const hidden = bot({ ui_meta: { "hermes-bots": { hidden: true } } });
+    const visible = bot({ ui_meta: { "hermes-bots": { hidden: false } } });
+    expect(isBotHidden(hidden)).toBe(true);
+    expect(isBotHidden(visible)).toBe(false);
+  });
+
+  it("Jason scenario: five active agents, hidden default not in active hub", () => {
+    const roster = jasonScenario();
+    const { visible, hidden } = splitRosterByHidden(roster);
+    expect(visible.map((row) => row.name)).toEqual([
+      "boss-bot",
+      "dev",
+      "bsv-ops",
+      "assistant",
+      "mainline",
+    ]);
+    expect(hidden.map((row) => row.name)).toEqual(["default"]);
+    expect(visible.some((row) => row.name === "default")).toBe(false);
+  });
+
+  it("only-hidden roster is incomplete — do not treat as active hub", () => {
+    const onlyHidden = [
+      bot({ name: "default", ui_meta: { "hermes-bots": { hidden: true } } }),
+    ];
+    expect(rosterOnlyHiddenDefault(onlyHidden)).toBe(true);
+    const { visible } = splitRosterByHidden(onlyHidden);
+    expect(visible).toHaveLength(0);
+    expect(rosterLoadIncomplete(onlyHidden, visible)).toBe(true);
+  });
+
+  it("default-only visible roster shows sync warning (not healthy hub)", () => {
+    const onlyDefault = [
+      bot({
+        name: "default",
+        handle: "hermes",
+        ui_meta: { "hermes-bots": { title: "Hermes", hidden: false } },
+        canonical_session: { id: "stale", last_active: 1, preview: "OK" },
+      }),
+    ];
+    const { visible } = splitRosterByHidden(onlyDefault);
+    expect(visible).toHaveLength(1);
+    expect(rosterLoadIncomplete(onlyDefault, visible)).toBe(false);
+    expect(rosterDefaultOnlyWarning(onlyDefault)).toBe(true);
+    expect(rosterOnlyDefault(onlyDefault)).toBe(true);
+  });
+
+  it("formatMobileError never surfaces raw 404 session detail", () => {
+    expect(formatMobileError("404: {detail:Session not found}")).not.toContain("404:");
+    expect(formatMobileError("404: {detail:Session not found}")).not.toContain("{detail:");
+    expect(formatMobileError("404: {detail:Session not found}")).not.toContain("Session not found");
+    expect(isSessionNotFoundError("404: {detail:Session not found}")).toBe(true);
   });
 });

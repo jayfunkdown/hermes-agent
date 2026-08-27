@@ -126,5 +126,4 @@ export function stopFaceClock() {
   window.__hbFaceClock?.stop();
 }
 
-// Re-export paint helpers used by BotFace.
 export { paintMathFace, walkMathFaces } from "@/lib/bot-face-math";

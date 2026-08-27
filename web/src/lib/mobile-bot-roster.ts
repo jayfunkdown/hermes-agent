@@ -1,6 +1,4 @@
 import { profileColor } from "@/lib/profile-color";
-import type { SessionMessage } from "@/lib/api";
-import { countPersistedMessages, previewFromMessages } from "@/lib/mobile-session-sync";
 
 export const CANONICAL_CHAT_TITLE = "Bot Chat";
 export const ACTIVE_WINDOW_S = 90;
@@ -59,6 +57,10 @@ export interface MobileBotRow {
 
 export interface ProfilesListResult {
   profiles: MobileBotRow[];
+  default_only?: boolean;
+  incomplete?: boolean;
+  profile_count?: number;
+  source?: string;
 }
 
 export function defaultShapeFor(name: string): string {
@@ -69,13 +71,72 @@ export function defaultShapeFor(name: string): string {
   return AVATAR_SHAPES[hash % AVATAR_SHAPES.length] ?? "circle";
 }
 
+/** Desktop parity: `ui_meta['hermes-bots']` on each profiles.list row. */
 export function botRosterMeta(bot: MobileBotRow): BotUiMeta {
   const raw = bot.ui_meta?.["hermes-bots"];
   return raw && typeof raw === "object" ? (raw as BotUiMeta) : {};
 }
 
+/** Hidden/archived bots — same flag desktop reads via isBotHidden / botRosterMeta.hidden. */
 export function isBotHidden(bot: MobileBotRow): boolean {
   return Boolean(botRosterMeta(bot).hidden);
+}
+
+export function splitRosterByHidden(bots: MobileBotRow[]) {
+  const visible: MobileBotRow[] = [];
+  const hidden: MobileBotRow[] = [];
+  for (const bot of bots) {
+    if (isBotHidden(bot)) hidden.push(bot);
+    else visible.push(bot);
+  }
+  return { visible: sortBotsForHub(visible), hidden: sortBotsForHub(hidden) };
+}
+
+/** True when the only roster row is the default profile (hidden or not). */
+export function rosterOnlyDefault(bots: MobileBotRow[]): boolean {
+  if (bots.length !== 1) return false;
+  return (bots[0]?.name || "").trim().toLowerCase() === "default";
+}
+
+/** True when the only roster row is hidden default — do not treat as the active hub. */
+export function rosterOnlyHiddenDefault(bots: MobileBotRow[]): boolean {
+  return rosterOnlyDefault(bots) && Boolean(bots[0] && isBotHidden(bots[0]));
+}
+
+/**
+ * Empty / all-hidden hubs are incomplete. A visible default-only row is NOT
+ * empty — callers should still surface {@link rosterDefaultOnlyWarning}.
+ */
+export function rosterLoadIncomplete(allBots: MobileBotRow[], visibleBots: MobileBotRow[]): boolean {
+  if (allBots.length === 0) return false;
+  if (visibleBots.length > 0) return false;
+  return rosterOnlyHiddenDefault(allBots) || allBots.every(isBotHidden);
+}
+
+/**
+ * Default-only responses must not be painted as a healthy multi-agent Bot Mode hub.
+ * Desktop typically lists boss-bot/dev/… — warn so the user retries instead of trusting Hermes@hermes alone.
+ */
+export function rosterDefaultOnlyWarning(allBots: MobileBotRow[]): boolean {
+  return rosterOnlyDefault(allBots);
+}
+
+export function isSessionNotFoundError(error: unknown): boolean {
+  const raw = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return raw.includes("session not found") || /\b404\b/.test(raw);
+}
+
+/** Never surface raw `404: {detail:Session not found}` to mobile users. */
+export function formatMobileError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const lower = raw.toLowerCase();
+  if (lower.includes("session not found") || /404.*session/.test(lower)) {
+    return "Couldn't open this agent's chat. Go back and tap the agent again, or pick another agent.";
+  }
+  if (raw.startsWith("404:") || raw.includes("{detail:")) {
+    return "Couldn't load this chat. The session may have moved — go back and tap the agent again.";
+  }
+  return raw.replace(/^404:\s*/i, "").trim() || "Something went wrong. Please retry.";
 }
 
 export function botAppearance(name: string, meta: BotUiMeta) {
@@ -179,141 +240,6 @@ export function sortBotsForHub(bots: MobileBotRow[]): MobileBotRow[] {
     const rightActive = botActivitySession(right)?.last_active || 0;
     return rightActive - leftActive;
   });
-}
-
-export function botMatchesHubQuery(bot: MobileBotRow, query: string): boolean {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return true;
-  const meta = botRosterMeta(bot);
-  const haystack = [
-    displayName(bot, meta),
-    bot.name,
-    botHandle(bot.name, bot),
-    bot.description ?? "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes(needle);
-}
-
-export function partitionBotsForHub(bots: MobileBotRow[], query = "") {
-  const sorted = sortBotsForHub(bots);
-  const visible: MobileBotRow[] = [];
-  const hidden: MobileBotRow[] = [];
-  for (const bot of sorted) {
-    if (!botMatchesHubQuery(bot, query)) continue;
-    if (isBotHidden(bot)) {
-      hidden.push(bot);
-    } else {
-      visible.push(bot);
-    }
-  }
-  return {
-    visible,
-    hidden,
-    hiddenCount: bots.filter((bot) => isBotHidden(bot)).length,
-  };
-}
-
-export interface BotRosterLocalBump {
-  last_active: number;
-  preview: string;
-  message_count?: number;
-}
-
-function bumpSessionSummary(
-  session: BotSessionSummary | null | undefined,
-  bump: BotRosterLocalBump,
-  fallbackId = "",
-): BotSessionSummary {
-  return {
-    id: session?.id || fallbackId,
-    resolved_id: session?.resolved_id,
-    title: session?.title || CANONICAL_CHAT_TITLE,
-    started_at: session?.started_at,
-    last_active: bump.last_active,
-    preview: bump.preview || session?.preview || "",
-    message_count:
-      bump.message_count !== undefined
-        ? Math.max(session?.message_count || 0, bump.message_count)
-        : session?.message_count,
-  };
-}
-
-export function bumpBotInRoster(
-  bots: MobileBotRow[],
-  botName: string,
-  messages?: SessionMessage[],
-): { bots: MobileBotRow[]; bump: BotRosterLocalBump | null } {
-  const preview = messages ? previewFromMessages(messages) : "";
-  const bump: BotRosterLocalBump = {
-    last_active: Math.floor(Date.now() / 1000),
-    preview,
-    message_count: messages ? countPersistedMessages(messages) : undefined,
-  };
-
-  let touched = false;
-  const next = bots.map((bot) => {
-    if (bot.name !== botName) return bot;
-    touched = true;
-    const canonical = bumpSessionSummary(bot.canonical_session, bump);
-    return {
-      ...bot,
-      canonical_session: bot.canonical_session ? canonical : canonical,
-      last_session: bot.last_session
-        ? bumpSessionSummary(bot.last_session, bump, bot.last_session.id)
-        : bot.last_session,
-    };
-  });
-
-  if (!touched) {
-    return { bots, bump };
-  }
-
-  return { bots: sortBotsForHub(next), bump };
-}
-
-export function mergeRosterWithLocalBumps(
-  bots: MobileBotRow[],
-  bumps: Map<string, BotRosterLocalBump>,
-): MobileBotRow[] {
-  if (bumps.size === 0) return bots;
-
-  const next = bots.map((bot) => {
-    const bump = bumps.get(bot.name);
-    if (!bump) return bot;
-
-    const session = botActivitySession(bot);
-    const serverActive = session?.last_active || 0;
-    if (serverActive >= bump.last_active) {
-      return bot;
-    }
-
-    const canonical = bumpSessionSummary(bot.canonical_session, bump);
-    return {
-      ...bot,
-      canonical_session: bot.canonical_session ? canonical : canonical,
-      last_session: bot.last_session
-        ? bumpSessionSummary(bot.last_session, bump, bot.last_session.id)
-        : bot.last_session,
-    };
-  });
-
-  return sortBotsForHub(next);
-}
-
-export function pruneCaughtUpRosterBumps(
-  bots: MobileBotRow[],
-  bumps: Map<string, BotRosterLocalBump>,
-): void {
-  for (const [name, bump] of bumps) {
-    const bot = bots.find((row) => row.name === name);
-    if (!bot) continue;
-    const serverActive = botActivitySession(bot)?.last_active || 0;
-    if (serverActive >= bump.last_active) {
-      bumps.delete(name);
-    }
-  }
 }
 
 export function activityLabelForGatewayEvent(type: string, payload: unknown): string | null {

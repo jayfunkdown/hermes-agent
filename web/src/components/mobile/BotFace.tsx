@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { blobatar as blobatarSvg } from "blobatar/blob";
+import { blobatar as blobatarSvg } from "@/vendor/blobatar/blob.js";
 
 import {
   blobMarkup,

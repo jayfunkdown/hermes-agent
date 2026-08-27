@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { AlertCircle, ArrowLeft, Bot, ChevronDown, ChevronRight, EyeOff, RefreshCw, Search, Send } from "lucide-react";
+import { AlertCircle, Archive, ArrowLeft, Bot, ChevronRight, RefreshCw, Search, Send } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
@@ -21,10 +21,10 @@ import {
 } from "@/hooks/useMobileBotRoster";
 import { api, authedFetch, type SessionMessage } from "@/lib/api";
 import {
-  canonicalChatSessionId,
-  displayName,
   botRosterMeta,
-  partitionBotsForHub,
+  displayName,
+  formatMobileError,
+  isSessionNotFoundError,
   type MobileBotRow as MobileBot,
 } from "@/lib/mobile-bot-roster";
 import { renderMobileSessionMessages } from "@/lib/mobile-agent-delivery-render";
@@ -42,6 +42,8 @@ import { cn, timeAgo } from "@/lib/utils";
 
 const STREAM_RETRY_BASE_MS = 1_000;
 const STREAM_RETRY_MAX_MS = 12_000;
+
+type HubView = "active" | "archived";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -171,6 +173,7 @@ export default function MobileMirrorPage() {
   const gateway = gatewayRef.current;
 
   const sessionParam = searchParams.get("session") ?? "";
+  const [hubView, setHubView] = useState<HubView>("active");
   const [hubQuery, setHubQuery] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState(sessionParam);
   const [selectedBotName, setSelectedBotName] = useState<string | null>(null);
@@ -178,34 +181,47 @@ export default function MobileMirrorPage() {
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [streamStatus, setStreamStatus] = useState<"idle" | "connecting" | "live" | "reconnecting" | "error">("idle");
   const [streamNote, setStreamNote] = useState<string | null>(null);
+  const [chatLoadFailed, setChatLoadFailed] = useState(false);
   const [composer, setComposer] = useState("");
   const [sendBusy, setSendBusy] = useState(false);
   const [awaitingReply, setAwaitingReply] = useState(false);
   const [openingBot, setOpeningBot] = useState<string | null>(null);
-  const [showHiddenBots, setShowHiddenBots] = useState(false);
+  const [hubOpenError, setHubOpenError] = useState<string | null>(null);
 
-  const { bots, loading: botsLoading, error: botsError, avatars, refresh: refreshBots, bumpBotFromMessages } =
-    useMobileBotRoster(gateway);
+  const {
+    allBots,
+    bots,
+    hiddenBots,
+    rosterIncomplete,
+    defaultOnlyWarning,
+    loading: botsLoading,
+    error: botsError,
+    avatars,
+    refresh: refreshBots,
+  } = useMobileBotRoster(gateway);
   const keyboardInset = useMobileKeyboardInset();
 
   const selectedSessionRef = useRef(selectedSessionId);
+  const selectedBotRef = useRef(selectedBotName);
   const resolvedSessionIdRef = useRef("");
   const cursorRef = useRef(0);
   const streamRunRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
+  const rosterForDelivery = allBots.length > 0 ? allBots : bots;
+
   const activeBot = useMemo(() => {
     if (selectedBotName) {
-      return bots.find((bot) => bot.name === selectedBotName) ?? null;
+      return rosterForDelivery.find((bot) => bot.name === selectedBotName) ?? null;
     }
     if (!selectedSessionId) return null;
     return (
-      bots.find((bot) => {
-        const canonical = canonicalChatSessionId(bot);
+      rosterForDelivery.find((bot) => {
+        const canonical = bot.canonical_session?.resolved_id || bot.canonical_session?.id;
         return canonical === selectedSessionId || bot.canonical_session?.id === selectedSessionId;
       }) ?? null
     );
-  }, [bots, selectedBotName, selectedSessionId]);
+  }, [bots, rosterForDelivery, selectedBotName, selectedSessionId]);
 
   const scopedProfile = activeBot
     ? activeBot.name === "default"
@@ -221,19 +237,26 @@ export default function MobileMirrorPage() {
 
   const renderedMessages = useMemo(() => renderMobileSessionMessages(messages), [messages]);
 
-  const hubQueryActive = Boolean(hubQuery.trim());
-  const { visible: visibleBots, hidden: hiddenBots, hiddenCount } = useMemo(
-    () => partitionBotsForHub(bots, hubQuery),
-    [bots, hubQuery],
-  );
-  const showHiddenRows = showHiddenBots || hubQueryActive;
-  const allBotsHidden = bots.length > 0 && hiddenCount === bots.length;
+  const hubBots = hubView === "archived" ? hiddenBots : bots;
+
+  const filteredBots = useMemo(() => {
+    const needle = hubQuery.trim().toLowerCase();
+    if (!needle) return hubBots;
+    return hubBots.filter((bot) => {
+      const meta = botRosterMeta(bot);
+      const haystack = [displayName(bot, meta), bot.name, botHandleForSearch(bot), bot.description ?? ""]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [hubBots, hubQuery]);
 
   const inChat = Boolean(selectedSessionId);
   const busyBotName = gatewayBusy && activeBot ? activeBot.name : null;
 
   const statusText = useMemo(() => {
     if (!selectedSessionId) return "Pick an agent";
+    if (chatLoadFailed) return "Chat unavailable";
     if (messagesLoading) return "Loading messages…";
     if (gatewayBusy) return "Working…";
     if (streamStatus === "connecting") return "Connecting…";
@@ -241,12 +264,13 @@ export default function MobileMirrorPage() {
     if (streamStatus === "live") return "Live";
     if (streamStatus === "error") return streamNote ?? "Sync unavailable";
     return "Ready";
-  }, [gatewayBusy, messagesLoading, selectedSessionId, streamNote, streamStatus]);
+  }, [chatLoadFailed, gatewayBusy, messagesLoading, selectedSessionId, streamNote, streamStatus]);
 
   const showThinking = useMemo(
     () =>
+      !chatLoadFailed &&
       shouldShowThinkingIndicator(messages, awaitingReply || gatewayBusy, streamStatus === "live"),
-    [awaitingReply, gatewayBusy, messages, streamStatus],
+    [awaitingReply, chatLoadFailed, gatewayBusy, messages, streamStatus],
   );
 
   useEffect(() => {
@@ -254,41 +278,31 @@ export default function MobileMirrorPage() {
   }, [selectedSessionId]);
 
   useEffect(() => {
+    selectedBotRef.current = selectedBotName;
+  }, [selectedBotName]);
+
+  useEffect(() => {
     if (!inChat || messagesLoading) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activities, inChat, messages, messagesLoading, showThinking]);
 
   const applyMessageDelta = useCallback(async (sessionId: string, afterId: number, profileName: string) => {
-    const next = await api.getSessionMessagesSince(
-      sessionId,
-      afterId,
-      profileName,
-      cursorRef.current || undefined,
-    );
-    if (next.unchanged) {
-      const revision = next.latest_message_id ?? next.revision ?? cursorRef.current;
-      if (revision > cursorRef.current) cursorRef.current = revision;
-      return;
-    }
+    const next = await api.getSessionMessagesSince(sessionId, afterId, profileName);
     const incoming = next.messages ?? [];
     if (incoming.length === 0) {
       const revision = next.latest_message_id ?? next.revision ?? afterId;
       if (revision > cursorRef.current) cursorRef.current = revision;
       return;
     }
-    let mergedMessages: SessionMessage[] | null = null;
     setMessages((prev) => {
-      mergedMessages = mergeSessionMessages(prev, incoming);
-      cursorRef.current = latestMessageId(mergedMessages);
+      const merged = mergeSessionMessages(prev, incoming);
+      cursorRef.current = latestMessageId(merged);
       if (incoming.some((message) => message.role === "assistant")) {
         setAwaitingReply(false);
       }
-      return mergedMessages;
+      return merged;
     });
-    if (mergedMessages) {
-      bumpBotFromMessages(profileName.trim() || "default", mergedMessages);
-    }
-  }, [bumpBotFromMessages]);
+  }, []);
 
   useEffect(() => {
     if (!sessionParam || sessionParam === selectedSessionId) return;
@@ -304,6 +318,7 @@ export default function MobileMirrorPage() {
       setMessagesLoading(false);
       setStreamStatus("idle");
       setStreamNote(null);
+      setChatLoadFailed(false);
       setAwaitingReply(false);
       cursorRef.current = 0;
       return;
@@ -313,31 +328,60 @@ export default function MobileMirrorPage() {
     const runId = ++streamRunRef.current;
     setMessagesLoading(true);
     setStreamNote(null);
+    setChatLoadFailed(false);
     setStreamStatus("connecting");
     cursorRef.current = 0;
     setMessages([]);
 
-    const loadInitial = async () => {
-      const response = await api.getSessionMessages(sessionId, scopedProfile || "");
-      if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
+    const loadInitial = async (attemptSessionId: string, repaired = false): Promise<string | undefined> => {
+      try {
+        const response = await api.getSessionMessages(attemptSessionId, scopedProfile || "");
+        if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
 
-      const resolvedSessionId = response.session_id || sessionId;
-      if (resolvedSessionId !== selectedSessionRef.current) {
-        setSelectedSessionId(resolvedSessionId);
-        setSearchParams((prev) => {
-          const next = new URLSearchParams(prev);
-          next.set("session", resolvedSessionId);
-          return next;
-        }, { replace: true });
+        const resolvedSessionId = response.session_id || attemptSessionId;
+        if (resolvedSessionId !== selectedSessionRef.current) {
+          setSelectedSessionId(resolvedSessionId);
+          setSearchParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.set("session", resolvedSessionId);
+            return next;
+          }, { replace: true });
+        }
+
+        const initialMessages = response.messages ?? [];
+        setMessages(initialMessages);
+        cursorRef.current = latestMessageId(initialMessages);
+        resolvedSessionIdRef.current = resolvedSessionId;
+        setMessagesLoading(false);
+        setStreamStatus("live");
+        return resolvedSessionId;
+      } catch (error) {
+        if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
+
+        if (!repaired && isSessionNotFoundError(error) && selectedBotRef.current) {
+          try {
+            const repairedId = await ensureCanonicalChat(gateway, selectedBotRef.current);
+            if (repairedId && repairedId !== attemptSessionId) {
+              setSelectedSessionId(repairedId);
+              setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("session", repairedId);
+                return next;
+              }, { replace: true });
+              await refreshBots();
+              return loadInitial(repairedId, true);
+            }
+          } catch {
+            /* fall through to friendly error */
+          }
+        }
+
+        setMessagesLoading(false);
+        setStreamStatus("error");
+        setChatLoadFailed(true);
+        setStreamNote(formatMobileError(error));
+        return undefined;
       }
-
-      const initialMessages = response.messages ?? [];
-      setMessages(initialMessages);
-      cursorRef.current = latestMessageId(initialMessages);
-      resolvedSessionIdRef.current = resolvedSessionId;
-      setMessagesLoading(false);
-      setStreamStatus("live");
-      return resolvedSessionId;
     };
 
     const syncDelta = async (resolvedSessionId: string, afterId: number) => {
@@ -376,43 +420,41 @@ export default function MobileMirrorPage() {
           attempt = 0;
         } catch (error) {
           if (controller.signal.aborted || streamRunRef.current !== runId) return;
-          setStreamNote(error instanceof Error ? error.message : String(error));
+          setStreamNote(formatMobileError(error));
           setStreamStatus("reconnecting");
           await sleep(streamRetryDelay(attempt++));
         }
       }
     };
 
-    void loadInitial()
+    void loadInitial(sessionId)
       .then((resolved) => {
         if (!resolved || cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
         void runStream(resolved);
-      })
-      .catch((error: Error) => {
-        if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
-        setMessagesLoading(false);
-        setStreamStatus("error");
-        setStreamNote(error.message || "failed to load session");
       });
 
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, [applyMessageDelta, scopedProfile, selectedSessionId, setSearchParams]);
+  }, [applyMessageDelta, gateway, refreshBots, scopedProfile, selectedSessionId, setSearchParams]);
 
   const openBot = useCallback(
     async (bot: MobileBot) => {
       setOpeningBot(bot.name);
+      setChatLoadFailed(false);
+      setStreamNote(null);
+      setHubOpenError(null);
       try {
         const profileName = bot.name === "default" ? "" : bot.name;
         setProfile(profileName);
         setSelectedBotName(bot.name);
-        let sessionId = canonicalChatSessionId(bot);
-        if (!sessionId) {
-          sessionId = await ensureCanonicalChat(gateway, bot.name);
-          await refreshBots();
+        if (gateway.connectionState !== "open") {
+          await gateway.connect();
         }
+        // Always adopt/create canonical Bot Chat by profile name — repairs stale pointers.
+        const sessionId = await ensureCanonicalChat(gateway, bot.name);
+        await refreshBots();
         setSelectedSessionId(sessionId);
         setSearchParams((prev) => {
           const next = new URLSearchParams(prev);
@@ -422,8 +464,19 @@ export default function MobileMirrorPage() {
           return next;
         }, { replace: false });
       } catch (error) {
-        setStreamNote(error instanceof Error ? error.message : String(error));
+        const friendly = formatMobileError(error);
+        setChatLoadFailed(true);
+        setStreamNote(friendly);
+        setHubOpenError(friendly);
         setStreamStatus("error");
+        setSelectedBotName(null);
+        // Do not leave a stale session id that would fetch messages and paint raw 404s.
+        setSelectedSessionId("");
+        setSearchParams((prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("session");
+          return next;
+        }, { replace: true });
       } finally {
         setOpeningBot(null);
       }
@@ -434,6 +487,8 @@ export default function MobileMirrorPage() {
   const leaveChat = useCallback(() => {
     setSelectedSessionId("");
     setSelectedBotName(null);
+    setChatLoadFailed(false);
+    setStreamNote(null);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete("session");
@@ -443,7 +498,7 @@ export default function MobileMirrorPage() {
 
   const submitComposer = useCallback(async () => {
     const text = composer.trim();
-    if (!text || !selectedSessionId || sendBusy) return;
+    if (!text || !selectedSessionId || sendBusy || chatLoadFailed) return;
     setSendBusy(true);
     setAwaitingReply(true);
     try {
@@ -467,14 +522,14 @@ export default function MobileMirrorPage() {
       void refreshBots();
     } catch (error) {
       setAwaitingReply(false);
-      setStreamNote(error instanceof Error ? error.message : String(error));
+      setStreamNote(formatMobileError(error));
       setStreamStatus("error");
     } finally {
       setSendBusy(false);
     }
-  }, [applyMessageDelta, composer, refreshBots, scopedProfile, sendBusy, selectedSessionId, setSearchParams]);
+  }, [applyMessageDelta, chatLoadFailed, composer, refreshBots, scopedProfile, sendBusy, selectedSessionId, setSearchParams]);
 
-  const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy;
+  const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy || chatLoadFailed;
   const profileLabel = currentProfile === profile || !profile ? currentProfile || "default" : profile;
   const chatTitle = activeBot ? displayName(activeBot, botRosterMeta(activeBot)) : "Agent";
 
@@ -483,12 +538,24 @@ export default function MobileMirrorPage() {
       <aside className={cn("flex min-h-0 w-full flex-col border-current/10 bg-background-base lg:w-[min(100%,24rem)] lg:border-r", inChat && "hidden lg:flex")}>
         <header className="shrink-0 border-b border-current/10 px-4 py-3">
           <div className="flex items-center gap-2">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/15 text-primary">
-              <Bot className="h-5 w-5" />
-            </div>
+            {hubView === "archived" ? (
+              <Button ghost size="icon" onClick={() => setHubView("active")} aria-label="Back to active agents">
+                <ArrowLeft />
+              </Button>
+            ) : (
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/15 text-primary">
+                <Bot className="h-5 w-5" />
+              </div>
+            )}
             <div className="min-w-0 flex-1">
-              <div className="text-lg font-semibold text-foreground">Agent Hub</div>
-              <div className="truncate text-xs text-text-tertiary">Bot Mode · {profileLabel}</div>
+              <div className="text-lg font-semibold text-foreground">
+                {hubView === "archived" ? "Archived" : "Agent Hub"}
+              </div>
+              <div className="truncate text-xs text-text-tertiary">
+                {hubView === "archived"
+                  ? `${hiddenBots.length} archived agent${hiddenBots.length === 1 ? "" : "s"}`
+                  : `Bot Mode · ${profileLabel}`}
+              </div>
             </div>
             <Button ghost size="icon" onClick={() => void refreshBots()} aria-label="Refresh agents">
               <RefreshCw className={cn(botsLoading && "animate-spin")} />
@@ -499,7 +566,7 @@ export default function MobileMirrorPage() {
             <input
               value={hubQuery}
               onChange={(event) => setHubQuery(event.target.value)}
-              placeholder="Search agents"
+              placeholder={hubView === "archived" ? "Search archived" : "Search agents"}
               className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-text-tertiary"
               aria-label="Search agents"
             />
@@ -511,84 +578,114 @@ export default function MobileMirrorPage() {
             <div className="flex flex-col gap-2 p-4">
               <div className="flex items-start gap-2 rounded-2xl border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                <span>{botsError}</span>
+                <span>{formatMobileError(botsError)}</span>
               </div>
               <Button outlined size="sm" onClick={() => void refreshBots()} prefix={<RefreshCw />}>
                 Retry
               </Button>
             </div>
-          ) : botsLoading && bots.length === 0 ? (
+          ) : botsLoading && allBots.length === 0 ? (
             <div className="flex items-center justify-center gap-2 py-12 text-sm text-text-tertiary">
               <Spinner /> Loading agents…
             </div>
-          ) : allBotsHidden && !showHiddenRows ? (
-            <div className="flex flex-col gap-3 px-4 py-8 text-sm text-text-tertiary">
-              <div className="flex items-center gap-2 font-medium text-foreground/80">
-                <EyeOff className="h-4 w-4 text-text-tertiary" />
-                All agents are hidden
+          ) : hubView === "active" && rosterIncomplete ? (
+            <div className="flex flex-col gap-2 p-4">
+              <div className="flex items-start gap-2 rounded-2xl border border-warning/20 bg-warning/5 p-3 text-sm text-warning">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="min-w-0 space-y-1">
+                  <div className="font-medium text-foreground">Roster sync needed</div>
+                  <p>
+                    Could not load the desktop Bot Mode agent list. Only a hidden/default
+                    profile is available — this is not your full agent hub. Retry, or open
+                    Archived for hidden agents.
+                  </p>
+                </div>
               </div>
-              <p className="leading-relaxed">They keep working and retain their history.</p>
-              <Button outlined size="sm" onClick={() => setShowHiddenBots(true)} className="self-start">
-                Show hidden agents
+              <Button outlined size="sm" onClick={() => void refreshBots()} prefix={<RefreshCw />}>
+                Retry
               </Button>
             </div>
-          ) : visibleBots.length === 0 && hiddenBots.length === 0 ? (
+          ) : filteredBots.length === 0 ? (
             <div className="px-6 py-12 text-center text-sm text-text-tertiary">
-              {hubQueryActive ? "No agents match your search." : "No Bot Mode agents found."}
+              {hubQuery.trim()
+                ? "No agents match your search."
+                : hubView === "archived"
+                  ? "No archived agents."
+                  : "No active agents found"}
             </div>
           ) : (
             <>
-              {visibleBots.map((bot) => (
+              {hubView === "active" && defaultOnlyWarning ? (
+                <div className="flex items-start gap-2 border-b border-warning/20 bg-warning/5 px-4 py-3 text-sm text-warning">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div className="min-w-0 space-y-1">
+                    <div className="font-medium text-foreground">Roster may be incomplete</div>
+                    <p>
+                      Only the default Hermes profile was returned. Desktop Bot Mode agents
+                      (for example @boss-bot, @dev) are missing — tap Retry before treating
+                      this as your hub.
+                    </p>
+                    <Button
+                      outlined
+                      size="sm"
+                      className="mt-1"
+                      onClick={() => void refreshBots()}
+                      prefix={<RefreshCw />}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              {filteredBots.map((bot) => (
                 <MobileBotRow
                   key={bot.name}
                   bot={bot}
                   active={bot.name === activeBot?.name}
+                  archived={hubView === "archived"}
                   avatarUrl={avatars[bot.name]}
                   activeProfile={scopedProfile || "default"}
                   busyBotName={busyBotName}
                   onClick={() => void openBot(bot)}
                 />
               ))}
-              {hiddenCount > 0 ? (
-                <div className="mt-1 border-t border-current/10 pt-1">
-                  <button
-                    type="button"
-                    aria-expanded={showHiddenRows}
-                    onClick={() => setShowHiddenBots((open) => !open)}
-                    className="flex w-full items-center gap-2 px-4 py-2 text-left text-[0.6875rem] font-medium text-text-tertiary transition-colors hover:bg-muted/20"
-                  >
-                    {showHiddenRows ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                    <EyeOff className="h-3.5 w-3.5" />
-                    <span>Hidden</span>
-                    <span className="text-text-tertiary/70">{hiddenCount}</span>
-                  </button>
-                  {showHiddenRows ? (
-                    hiddenBots.length > 0 ? (
-                      hiddenBots.map((bot) => (
-                        <MobileBotRow
-                          key={`hidden:${bot.name}`}
-                          bot={bot}
-                          hidden
-                          active={bot.name === activeBot?.name}
-                          avatarUrl={avatars[bot.name]}
-                          activeProfile={scopedProfile || "default"}
-                          busyBotName={busyBotName}
-                          onClick={() => void openBot(bot)}
-                        />
-                      ))
-                    ) : (
-                      <div className="px-4 py-2 text-xs text-text-tertiary">
-                        No hidden agents match your search.
-                      </div>
-                    )
-                  ) : null}
-                </div>
-              ) : null}
             </>
           )}
+
+          {hubView === "active" && hiddenBots.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setHubQuery("");
+                setHubView("archived");
+              }}
+              className="flex w-full items-center gap-3 border-b border-current/5 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+            >
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/40 text-text-tertiary">
+                <Archive className="h-5 w-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-[0.95rem] font-medium text-foreground">
+                  Archived ({hiddenBots.length})
+                </div>
+                <div className="text-sm text-text-tertiary">
+                  {hiddenBots.length} hidden agent{hiddenBots.length === 1 ? "" : "s"}
+                </div>
+              </div>
+              <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />
+            </button>
+          ) : null}
+
           {openingBot ? (
             <div className="px-4 py-2 text-xs text-text-tertiary">
               Opening {openingBot}…
+            </div>
+          ) : null}
+
+          {hubOpenError ? (
+            <div className="m-4 flex items-start gap-2 rounded-2xl border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{hubOpenError}</span>
             </div>
           ) : null}
         </div>
@@ -624,9 +721,23 @@ export default function MobileMirrorPage() {
             </header>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-              {messagesLoading && messages.length === 0 ? (
+              {messagesLoading && messages.length === 0 && !chatLoadFailed ? (
                 <div className="flex h-full items-center justify-center gap-2 text-sm text-text-tertiary">
                   <Spinner /> Loading messages…
+                </div>
+              ) : chatLoadFailed && messages.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                  <AlertCircle className="h-8 w-8 text-destructive" />
+                  <p className="text-sm text-destructive">{streamNote}</p>
+                  <Button
+                    outlined
+                    size="sm"
+                    onClick={() => {
+                      if (activeBot) void openBot(activeBot);
+                    }}
+                  >
+                    Retry
+                  </Button>
                 </div>
               ) : (
                 <div className="flex flex-col gap-2 pb-4">
@@ -640,7 +751,7 @@ export default function MobileMirrorPage() {
                           body={item.parsed.body}
                           gateway={gateway}
                           rosterAvatars={avatars}
-                          bots={bots}
+                          bots={rosterForDelivery}
                         />
                       );
                     }
@@ -653,7 +764,7 @@ export default function MobileMirrorPage() {
                           replyBody={item.delivery.replyBody}
                           gateway={gateway}
                           rosterAvatars={avatars}
-                          bots={bots}
+                          bots={rosterForDelivery}
                         />
                       );
                     }
@@ -678,7 +789,7 @@ export default function MobileMirrorPage() {
                 void submitComposer();
               }}
             >
-              {streamNote && streamStatus === "error" ? (
+              {streamNote && (streamStatus === "error" || chatLoadFailed) ? (
                 <div className="mb-3 rounded-2xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
                   {streamNote}
                 </div>
@@ -694,9 +805,9 @@ export default function MobileMirrorPage() {
                     }
                   }}
                   rows={1}
-                  placeholder="Message"
-                  className="max-h-32 min-h-[2.75rem] flex-1 resize-none rounded-3xl border border-current/10 bg-muted/20 px-4 py-2.5 text-sm outline-none transition focus:border-primary/40 focus:bg-background"
-                  disabled={sendBusy}
+                  placeholder={chatLoadFailed ? "Chat unavailable" : "Message"}
+                  className="max-h-32 min-h-[2.75rem] flex-1 resize-none rounded-3xl border border-current/10 bg-muted/20 px-4 py-2.5 text-sm outline-none transition focus:border-primary/40 focus:bg-background disabled:opacity-50"
+                  disabled={sendBusy || chatLoadFailed}
                 />
                 <Button type="submit" disabled={sendDisabled} size="icon" className="h-11 w-11 shrink-0 rounded-full" aria-label="Send message">
                   {sendBusy ? <Spinner /> : <Send className="h-4 w-4" />}
@@ -708,4 +819,8 @@ export default function MobileMirrorPage() {
       </main>
     </div>
   );
+}
+
+function botHandleForSearch(bot: MobileBot): string {
+  return bot.name === "default" ? "hermes" : bot.name;
 }

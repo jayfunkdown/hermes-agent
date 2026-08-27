@@ -7,6 +7,7 @@ import { I18nProvider } from "./i18n";
 import { exposePluginSDK } from "./plugins";
 import { ThemeProvider } from "./themes";
 import { HERMES_BASE_PATH } from "./lib/api";
+import { registerMobileServiceWorker } from "./lib/mobile-sw-update";
 
 const basePath = HERMES_BASE_PATH || "";
 if (typeof document !== "undefined") {
@@ -28,11 +29,7 @@ if (typeof document !== "undefined") {
   }
 }
 
-if (typeof window !== "undefined" && "serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    void navigator.serviceWorker.register(basePath ? `${basePath}/sw.js` : "/sw.js");
-  });
-}
+registerMobileServiceWorker(basePath ? `${basePath}/sw.js` : "/sw.js");
 
 // Expose the plugin SDK before rendering so plugins loaded via <script>
 // can access React, components, etc. immediately.

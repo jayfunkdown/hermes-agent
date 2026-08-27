@@ -1,6 +1,11 @@
 import { defineConfig, type Plugin } from "vite";
 import babel from "@rolldown/plugin-babel";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
+import { createHash } from "node:crypto";
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import tailwindcss from "@tailwindcss/vite";
+import path from "path";
 
 /** React Compiler preset scoped to modules that can actually contain
  *  components/hooks (JSX syntax or a react-ish import). The preset's default
@@ -11,10 +16,52 @@ function compilerPreset() {
   preset.rolldown.filter.code = /\/>|<\/|from\s*['"][^'"]*react/;
   return preset;
 }
-import tailwindcss from "@tailwindcss/vite";
-import path from "path";
 
 const BACKEND = process.env.HERMES_DASHBOARD_URL ?? "http://127.0.0.1:9119";
+
+/**
+ * Stamp a per-build id into `public/sw.js` so every deploy invalidates
+ * `hermes-mobile-shell-*` caches on phones automatically.
+ */
+function hermesMobileSwBuildId(): Plugin {
+  const placeholder = "__HERMES_MOBILE_SW_BUILD__";
+
+  const resolveBuildId = () => {
+    if (process.env.HERMES_MOBILE_SW_BUILD) {
+      return process.env.HERMES_MOBILE_SW_BUILD.replace(/[^a-zA-Z0-9._-]+/g, "-");
+    }
+    try {
+      const sha = execSync("git rev-parse --short=12 HEAD", {
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim();
+      if (sha) return sha;
+    } catch {
+      /* fall through */
+    }
+    return createHash("sha1").update(String(Date.now())).digest("hex").slice(0, 12);
+  };
+
+  return {
+    name: "hermes:mobile-sw-build-id",
+    apply: "build",
+    writeBundle(outputOptions) {
+      const buildId = resolveBuildId();
+      const outDir = outputOptions.dir;
+      if (!outDir) return;
+      const swPath = path.join(outDir, "sw.js");
+      try {
+        if (!fs.existsSync(swPath)) return;
+        const source = fs.readFileSync(swPath, "utf8");
+        if (!source.includes(placeholder)) return;
+        fs.writeFileSync(swPath, source.replaceAll(placeholder, buildId), "utf8");
+      } catch {
+        /* best-effort stamp */
+      }
+    },
+  };
+}
 
 /**
  * In production the Python `hermes dashboard` server injects a one-shot
@@ -74,6 +121,7 @@ export default defineConfig({
     babel({ presets: [compilerPreset()] }),
     tailwindcss(),
     hermesDevToken(),
+    hermesMobileSwBuildId(),
   ],
   resolve: {
     alias: {

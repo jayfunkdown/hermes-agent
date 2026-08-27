@@ -785,6 +785,28 @@ async def list_profiles_endpoint():
         return {"profiles": _fallback_profile_dicts(profiles_mod)}
 
 
+@router.get("/api/mobile/roster")
+async def mobile_roster_endpoint(include_sessions: bool = Query(True)):
+    """Authenticated Bot Mode roster for `/mobile` (desktop-parity descriptors).
+
+    Walks every local profile via ``list_profiles()`` and returns ui_meta,
+    hidden flags, canonical_session, and busy/worker hints. A default-only
+    response is flagged ``incomplete`` / ``default_only`` so the hub can show
+    a sync warning instead of treating Hermes@hermes as the full roster.
+    """
+    from hermes_cli.mobile_roster import build_mobile_roster
+
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: build_mobile_roster(include_sessions=bool(include_sessions)),
+        )
+    except Exception as exc:
+        _log.exception("GET /api/mobile/roster failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/api/profiles")
 async def create_profile_endpoint(body: ProfileCreate):
     from hermes_cli import profiles as profiles_mod
