@@ -1,7 +1,7 @@
 {
-  "name": "Hermes Mobile Mirror",
-  "short_name": "Hermes Mobile",
-  "description": "Installable mobile shell for live Hermes session mirroring.",
+  "name": "Hermes Agent Hub",
+  "short_name": "Agent Hub",
+  "description": "WhatsApp-style mobile hub for live Hermes agent conversations.",
   "start_url": "./mobile",
   "scope": "./",
   "display": "standalone",

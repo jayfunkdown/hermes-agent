@@ -5,6 +5,9 @@ import {
   latestMessageId,
   mergeSessionMessages,
   parseSessionStreamEvent,
+  sessionInitials,
+  sessionListTitle,
+  sessionPreviewText,
   sessionStreamCursor,
   shouldCollapseMessage,
 } from "./mobile-session-sync";
@@ -39,6 +42,23 @@ describe("mobile-session-sync", () => {
       ),
     ).toBe(12);
     expect(sessionStreamCursor({ type: "hello", after_id: 15 }, 9)).toBe(15);
+  });
+
+  it("builds hub list labels and preview text", () => {
+    expect(
+      sessionListTitle({
+        id: "20250827_120000_abcd",
+        title: "Boss bot",
+      } as never),
+    ).toBe("Boss bot");
+    expect(
+      sessionPreviewText({
+        id: "s1",
+        preview: "  latest reply  ",
+        message_count: 4,
+      } as never),
+    ).toBe("latest reply");
+    expect(sessionInitials({ id: "s1", title: "Boss Bot" } as never)).toBe("BB");
   });
 
   it("flags tool and artifact-style messages for collapse", () => {

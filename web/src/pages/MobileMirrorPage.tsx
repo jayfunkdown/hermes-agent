@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { AlertCircle, ChevronDown, Menu, RefreshCw, Send } from "lucide-react";
+import { AlertCircle, ArrowLeft, Bot, RefreshCw, Search, Send } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
-import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
 import { AuthWidget } from "@/components/AuthWidget";
@@ -15,8 +14,10 @@ import {
   mergeSessionMessages,
   parseSessionStreamEvent,
   sessionDisplayLabel,
+  sessionInitials,
+  sessionListTitle,
+  sessionPreviewText,
   sessionStreamCursor,
-  sessionTitle,
   shouldCollapseMessage,
   type SessionStreamEvent,
 } from "@/lib/mobile-session-sync";
@@ -86,38 +87,55 @@ async function* readSessionEventStream(
   }
 }
 
-function SessionBadge({
-  active,
+function AgentHubRow({
   session,
+  active,
   onClick,
 }: {
-  active: boolean;
   session: SessionInfo;
+  active: boolean;
   onClick: () => void;
 }) {
-  const label = sessionTitle(session);
+  const title = sessionListTitle(session);
+  const preview = sessionPreviewText(session);
+  const initials = sessionInitials(session);
+
   return (
-    <ListItem
+    <button
+      type="button"
       onClick={onClick}
       aria-current={active ? "true" : undefined}
       className={cn(
-        "flex-col items-start gap-0.5 rounded-xl px-3 py-2 text-left",
-        active
-          ? "border border-primary/30 bg-primary/10 text-foreground"
-          : "border border-transparent bg-muted/20 text-text-secondary hover:bg-muted/40 hover:text-foreground",
+        "flex w-full items-center gap-3 border-b border-current/5 px-4 py-3 text-left transition-colors",
+        active ? "bg-primary/10" : "hover:bg-muted/30",
       )}
     >
-      <span className="w-full truncate text-sm font-medium">{label}</span>
-      <span className="flex w-full items-center gap-1.5 text-[0.7rem] text-text-tertiary">
-        <span>{timeAgo(session.last_active)}</span>
-        {session.message_count > 0 && (
-          <>
-            <span aria-hidden>·</span>
-            <span>{session.message_count} msgs</span>
-          </>
+      <div
+        className={cn(
+          "flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-sm font-semibold",
+          active ? "bg-primary text-primary-foreground" : "bg-muted text-foreground",
         )}
-      </span>
-    </ListItem>
+        aria-hidden
+      >
+        {initials}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="min-w-0 flex-1 truncate text-[0.95rem] font-medium text-foreground">
+            {title}
+          </span>
+          <span className="shrink-0 text-[0.7rem] text-text-tertiary">
+            {timeAgo(session.last_active)}
+          </span>
+        </div>
+        <div className="mt-0.5 flex items-center gap-2">
+          <p className="min-w-0 flex-1 truncate text-sm text-text-tertiary">{preview}</p>
+          {session.is_active ? (
+            <span className="h-2 w-2 shrink-0 rounded-full bg-success" aria-label="Live" />
+          ) : null}
+        </div>
+      </div>
+    </button>
   );
 }
 
@@ -135,21 +153,18 @@ function ToolCallBlock({
   }
 
   return (
-    <div className="mt-2 overflow-hidden border border-warning/20 bg-warning/5 rounded-2xl">
+    <div className="mt-2 overflow-hidden rounded-2xl border border-warning/20 bg-warning/5">
       <button
         type="button"
         onClick={() => setOpen((next) => !next)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-warning hover:bg-warning/10"
         aria-expanded={open}
       >
-        <ChevronDown
-          className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-180")}
-        />
         <span className="font-mono-ui font-medium">{toolCall.function.name}</span>
         <span className="ml-auto truncate text-warning/50">{toolCall.id}</span>
       </button>
       {open && (
-        <pre className="border-t border-warning/20 px-3 py-2 text-xs leading-relaxed text-warning/90 whitespace-pre-wrap break-words font-mono overflow-x-auto">
+        <pre className="overflow-x-auto whitespace-pre-wrap break-words border-t border-warning/20 px-3 py-2 font-mono text-xs leading-relaxed text-warning/90">
           {args}
         </pre>
       )}
@@ -157,68 +172,82 @@ function ToolCallBlock({
   );
 }
 
-function MobileMessageBubble({ message }: { message: SessionMessage }) {
+function ChatBubble({ message }: { message: SessionMessage }) {
   if (message.display_kind === "hidden") {
     return null;
   }
 
   const collapseBody = shouldCollapseMessage(message);
-  const roleTone =
-    message.role === "user"
-      ? "border-primary/25 bg-primary/10"
-      : message.role === "assistant"
-        ? "border-success/20 bg-success/10"
-        : message.role === "tool"
-          ? "border-warning/20 bg-warning/10"
-          : "border-border bg-muted/20";
-
   const body = message.content?.trim() ?? "";
   const bodyPreview = body.length > 900 ? `${body.slice(0, 900).trim()}…` : body;
+  const isUser = message.role === "user";
+  const isAssistant = message.role === "assistant";
 
   return (
-    <article className={cn("rounded-2xl border p-3 shadow-sm", roleTone)}>
-      <div className="mb-2 flex items-center gap-2 text-[0.7rem] font-medium uppercase tracking-[0.16em] text-text-tertiary">
-        <span>
-          {message.role}
-          {message.tool_name ? ` · ${message.tool_name}` : ""}
-        </span>
-        {message.timestamp ? <span>{timeAgo(message.timestamp)}</span> : null}
-      </div>
+    <article
+      className={cn(
+        "flex w-full",
+        isUser ? "justify-end" : isAssistant ? "justify-start" : "justify-center",
+      )}
+    >
+      <div
+        className={cn(
+          "max-w-[min(88%,30rem)] rounded-2xl border px-3 py-2 shadow-sm",
+          isUser
+            ? "rounded-br-md border-primary/20 bg-primary/12"
+            : isAssistant
+              ? "rounded-bl-md border-border bg-muted/35"
+              : "w-full border-warning/20 bg-warning/8",
+        )}
+      >
+        {!isUser && !isAssistant ? (
+          <div className="mb-1 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-text-tertiary">
+            {message.role}
+            {message.tool_name ? ` · ${message.tool_name}` : ""}
+          </div>
+        ) : null}
 
-      {body ? (
-        collapseBody ? (
-          <details className="group">
-            <summary className="cursor-pointer list-none rounded-xl border border-current/10 bg-background/60 px-3 py-2 text-sm text-foreground/90">
-              <span className="inline-flex items-center gap-2">
-                <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
-                <span>Show message</span>
-                <span className="max-w-[12rem] truncate text-xs text-text-tertiary">{bodyPreview}</span>
-              </span>
-            </summary>
-            <div className="pt-3">
+        {body ? (
+          collapseBody ? (
+            <details className="group">
+              <summary className="cursor-pointer list-none text-sm text-foreground/90">
+                <span className="inline-flex items-center gap-2">
+                  <span>Show {message.role} message</span>
+                  <span className="max-w-[12rem] truncate text-xs text-text-tertiary">{bodyPreview}</span>
+                </span>
+              </summary>
+              <div className="pt-2">
+                <Markdown content={body} />
+              </div>
+            </details>
+          ) : (
+            <div className="text-sm leading-relaxed">
               <Markdown content={body} />
             </div>
-          </details>
+          )
         ) : (
-          <Markdown content={body} />
-        )
-      ) : (
-        <div className="text-sm text-text-tertiary">No text content.</div>
-      )}
+          <div className="text-sm text-text-tertiary">No text content.</div>
+        )}
 
-      {message.tool_calls && message.tool_calls.length > 0 && (
-        <div className="mt-3 flex flex-col gap-2">
-          {message.tool_calls.map((toolCall) => (
-            <ToolCallBlock key={toolCall.id} toolCall={toolCall} />
-          ))}
-        </div>
-      )}
+        {message.tool_calls && message.tool_calls.length > 0 && (
+          <div className="mt-2 flex flex-col gap-2">
+            {message.tool_calls.map((toolCall) => (
+              <ToolCallBlock key={toolCall.id} toolCall={toolCall} />
+            ))}
+          </div>
+        )}
 
-      {message.display_metadata && message.display_kind && message.display_kind !== "hidden" && (
-        <div className="mt-3 rounded-xl border border-current/10 bg-background/60 px-3 py-2 text-xs text-text-tertiary">
-          {message.display_kind}
-        </div>
-      )}
+        {message.timestamp ? (
+          <div
+            className={cn(
+              "mt-1 text-[0.65rem] text-text-tertiary",
+              isUser ? "text-right" : "text-left",
+            )}
+          >
+            {timeAgo(message.timestamp)}
+          </div>
+        ) : null}
+      </div>
     </article>
   );
 }
@@ -231,7 +260,7 @@ export default function MobileMirrorPage() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
-  const [railOpen, setRailOpen] = useState(false);
+  const [hubQuery, setHubQuery] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState(sessionParam);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -246,25 +275,50 @@ export default function MobileMirrorPage() {
   const statusAbortRef = useRef<AbortController | null>(null);
   const streamRunRef = useRef(0);
   const documentTitleRef = useRef(document.title);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
 
+  const filteredSessions = useMemo(() => {
+    const needle = hubQuery.trim().toLowerCase();
+    if (!needle) return sessions;
+    return sessions.filter((session) => {
+      const haystack = [
+        sessionListTitle(session),
+        sessionPreviewText(session),
+        session.id,
+        session.source ?? "",
+        session.model ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [hubQuery, sessions]);
+
+  const inChat = Boolean(selectedSessionId);
+
   const statusText = useMemo(() => {
-    if (!selectedSessionId) return "Pick a session to begin";
-    if (messagesLoading) return "Loading transcript…";
-    if (streamStatus === "connecting") return "Connecting live feed…";
+    if (!selectedSessionId) return "Pick an agent to chat";
+    if (messagesLoading) return "Loading messages…";
+    if (streamStatus === "connecting") return "Connecting…";
     if (streamStatus === "reconnecting") return "Reconnecting…";
-    if (streamStatus === "live") return "Live sync";
-    if (streamStatus === "error") return streamNote ?? "Live sync unavailable";
+    if (streamStatus === "live") return "Live";
+    if (streamStatus === "error") return streamNote ?? "Sync unavailable";
     return "Ready";
   }, [messagesLoading, selectedSessionId, streamNote, streamStatus]);
 
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!inChat || messagesLoading) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [inChat, messages, messagesLoading]);
 
   const applyMessageDelta = useCallback(
     async (sessionId: string, afterId: number, profileName: string) => {
@@ -296,17 +350,6 @@ export default function MobileMirrorPage() {
       .then((res) => {
         if (cancelled) return;
         setSessions(res.sessions);
-        if (!sessionParam && !selectedSessionRef.current) {
-          const first = res.sessions[0]?.id ?? "";
-          if (first) {
-            setSelectedSessionId(first);
-            setSearchParams((prev) => {
-              const next = new URLSearchParams(prev);
-              next.set("session", first);
-              return next;
-            }, { replace: true });
-          }
-        }
       })
       .catch((error: Error) => {
         if (cancelled) return;
@@ -319,7 +362,7 @@ export default function MobileMirrorPage() {
     return () => {
       cancelled = true;
     };
-  }, [profile, sessionParam, setSearchParams]);
+  }, [profile]);
 
   useEffect(() => {
     if (!sessionParam || sessionParam === selectedSessionId) return;
@@ -452,7 +495,9 @@ export default function MobileMirrorPage() {
   }, [applyMessageDelta, profile, selectedSessionId, setSearchParams]);
 
   useEffect(() => {
-    const title = activeSession ? `${sessionDisplayLabel(activeSession)} · Hermes Mobile` : "Hermes Mobile";
+    const title = activeSession
+      ? `${sessionDisplayLabel(activeSession)} · Hermes`
+      : "Hermes Agent Hub";
     document.title = title;
     return () => {
       document.title = documentTitleRef.current;
@@ -467,10 +512,18 @@ export default function MobileMirrorPage() {
         next.set("session", id);
         return next;
       }, { replace: false });
-      setRailOpen(false);
     },
     [setSearchParams],
   );
+
+  const leaveChat = useCallback(() => {
+    setSelectedSessionId("");
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("session");
+      return next;
+    }, { replace: false });
+  }, [setSearchParams]);
 
   const reloadSessions = useCallback(() => {
     setSessionsLoading(true);
@@ -504,184 +557,208 @@ export default function MobileMirrorPage() {
           return next;
         }, { replace: true });
       }
+      reloadSessions();
     } catch (error) {
       setStreamNote(error instanceof Error ? error.message : String(error));
       setStreamStatus("error");
     } finally {
       setSendBusy(false);
     }
-  }, [applyMessageDelta, composer, profile, sendBusy, selectedSessionId, setSearchParams]);
+  }, [applyMessageDelta, composer, profile, reloadSessions, sendBusy, selectedSessionId, setSearchParams]);
 
   const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy;
+  const profileLabel =
+    currentProfile === profile || !profile ? currentProfile || "default" : profile;
 
   return (
-    <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-background-base text-foreground">
-      <header className="flex shrink-0 items-center gap-2 border-b border-current/10 px-3 py-2">
-        <Button
-          ghost
-          size="icon"
-          onClick={() => setRailOpen((next) => !next)}
-          aria-label={railOpen ? "Close sessions" : "Open sessions"}
-        >
-          <Menu />
-        </Button>
-
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-foreground">
-            {sessionDisplayLabel(activeSession)}
+    <div className="flex h-dvh min-h-0 overflow-hidden bg-background-base text-foreground">
+      <aside
+        className={cn(
+          "flex min-h-0 w-full flex-col border-current/10 bg-background-base lg:w-[min(100%,24rem)] lg:border-r",
+          inChat && "hidden lg:flex",
+        )}
+      >
+        <header className="shrink-0 border-b border-current/10 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/15 text-primary">
+              <Bot className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-lg font-semibold text-foreground">Agent Hub</div>
+              <div className="truncate text-xs text-text-tertiary">{profileLabel}</div>
+            </div>
+            <Button
+              ghost
+              size="icon"
+              onClick={reloadSessions}
+              aria-label="Refresh agents"
+              title="Refresh agents"
+            >
+              <RefreshCw className={cn(sessionsLoading && "animate-spin")} />
+            </Button>
           </div>
-          <div className="truncate text-[0.7rem] text-text-tertiary">{statusText}</div>
-        </div>
+          <div className="mt-3 flex items-center gap-2 rounded-2xl border border-current/10 bg-muted/20 px-3 py-2">
+            <Search className="h-4 w-4 shrink-0 text-text-tertiary" />
+            <input
+              value={hubQuery}
+              onChange={(event) => setHubQuery(event.target.value)}
+              placeholder="Search agents"
+              className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-text-tertiary"
+              aria-label="Search agents"
+            />
+          </div>
+        </header>
 
-        <Button
-          ghost
-          size="icon"
-          onClick={reloadSessions}
-          aria-label="Refresh sessions"
-          title="Refresh sessions"
-        >
-          <RefreshCw className={cn(sessionsLoading && "animate-spin")} />
-        </Button>
-      </header>
-
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside
-          className={cn(
-            "fixed inset-y-0 left-0 z-30 w-[min(88vw,20rem)] border-r border-current/10 bg-background-base transition-transform duration-200 ease-out lg:static lg:z-auto lg:w-80 lg:translate-x-0",
-            railOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
-          )}
-        >
-          <div className="flex h-full min-h-0 flex-col">
-            <div className="flex items-center justify-between gap-2 border-b border-current/10 px-3 py-3">
-              <div className="min-w-0">
-                <div className="text-xs uppercase tracking-[0.18em] text-text-tertiary">Sessions</div>
-                <div className="truncate text-sm text-text-secondary">
-                  {currentProfile === profile || !profile ? currentProfile || "default" : profile}
-                </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {sessionsError ? (
+            <div className="flex flex-col gap-2 p-4">
+              <div className="flex items-start gap-2 rounded-2xl border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span className="break-words">{sessionsError}</span>
               </div>
-              <Button ghost size="icon" onClick={reloadSessions} aria-label="Refresh sessions">
-                <RefreshCw className={cn(sessionsLoading && "animate-spin")} />
+              <Button outlined size="sm" onClick={reloadSessions} prefix={<RefreshCw />}>
+                Retry
               </Button>
             </div>
+          ) : sessionsLoading && sessions.length === 0 ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-text-tertiary">
+              <Spinner /> Loading agents…
+            </div>
+          ) : filteredSessions.length === 0 ? (
+            <div className="px-6 py-12 text-center text-sm text-text-tertiary">
+              {hubQuery.trim() ? "No agents match your search." : "No agents found for this profile."}
+            </div>
+          ) : (
+            <div>
+              {filteredSessions.map((session) => (
+                <AgentHubRow
+                  key={session.id}
+                  session={session}
+                  active={session.id === selectedSessionId}
+                  onClick={() => pickSession(session.id)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              {sessionsError ? (
-                <div className="flex flex-col gap-2 rounded-2xl border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
-                  <div className="flex items-start gap-2">
-                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                    <span className="break-words">{sessionsError}</span>
-                  </div>
-                  <Button outlined size="sm" onClick={reloadSessions} prefix={<RefreshCw />}>
-                    Retry
-                  </Button>
+        <footer className="shrink-0 space-y-2 border-t border-current/10 px-4 py-3">
+          <ProfileSwitcher />
+          <AuthWidget />
+        </footer>
+      </aside>
+
+      <main
+        className={cn(
+          "flex min-h-0 min-w-0 flex-1 flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent_12rem)]",
+          !inChat && "hidden lg:flex",
+        )}
+      >
+        {!inChat ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center text-text-tertiary">
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted/30 text-foreground/70">
+              <Bot className="h-8 w-8" />
+            </div>
+            <div className="text-lg font-medium text-foreground">Hermes Agent Hub</div>
+            <p className="max-w-sm text-sm">
+              Pick an agent conversation to mirror live messages from your cloud Hermes backend.
+            </p>
+          </div>
+        ) : (
+          <>
+            <header className="flex shrink-0 items-center gap-2 border-b border-current/10 px-3 py-2">
+              <Button
+                ghost
+                size="icon"
+                onClick={leaveChat}
+                aria-label="Back to agents"
+                className="lg:hidden"
+              >
+                <ArrowLeft />
+              </Button>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-semibold text-foreground">
+                  {sessionDisplayLabel(activeSession)}
                 </div>
-              ) : sessionsLoading && sessions.length === 0 ? (
-                <div className="flex items-center justify-center gap-2 py-8 text-sm text-text-tertiary">
-                  <Spinner /> Loading sessions…
+                <div className="truncate text-[0.7rem] text-text-tertiary">{statusText}</div>
+              </div>
+              <Button
+                ghost
+                size="icon"
+                onClick={reloadSessions}
+                aria-label="Refresh agents"
+                title="Refresh agents"
+              >
+                <RefreshCw className={cn(sessionsLoading && "animate-spin")} />
+              </Button>
+            </header>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+              {messagesLoading && messages.length === 0 ? (
+                <div className="flex h-full items-center justify-center gap-2 text-sm text-text-tertiary">
+                  <Spinner /> Loading messages…
                 </div>
-              ) : sessions.length === 0 ? (
-                <div className="px-3 py-8 text-center text-sm text-text-tertiary">
-                  No sessions found for this profile.
+              ) : messages.length === 0 ? (
+                <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-tertiary">
+                  Send a message to start this conversation.
                 </div>
               ) : (
-                <div className="flex flex-col gap-2">
-                  {sessions.map((session) => (
-                    <SessionBadge
-                      key={session.id}
-                      session={session}
-                      active={session.id === selectedSessionId}
-                      onClick={() => pickSession(session.id)}
+                <div className="flex flex-col gap-2 pb-4">
+                  {messages.map((message) => (
+                    <ChatBubble
+                      key={
+                        message.id ??
+                        `${message.role}-${message.timestamp ?? ""}-${message.tool_call_id ?? ""}`
+                      }
+                      message={message}
                     />
                   ))}
+                  <div ref={messagesEndRef} />
                 </div>
               )}
             </div>
 
-            <div className="border-t border-current/10 px-3 py-3">
-              <div className="flex items-center justify-between gap-2">
-                <ProfileSwitcher />
-              </div>
-              <div className="mt-2 flex items-center justify-between gap-2 text-[0.7rem] text-text-tertiary">
-                <span>{streamStatus === "live" ? "Connected" : statusText}</span>
-                <span>{messages.length} messages</span>
-              </div>
-              <AuthWidget className="mt-2" />
-            </div>
-          </div>
-        </aside>
-
-        {railOpen && (
-          <button
-            type="button"
-            aria-label="Close sessions overlay"
-            onClick={() => setRailOpen(false)}
-            className="fixed inset-0 z-20 bg-black/50 lg:hidden"
-          />
-        )}
-
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-            {messagesLoading && messages.length === 0 ? (
-              <div className="flex h-full items-center justify-center gap-2 text-sm text-text-tertiary">
-                <Spinner /> Loading transcript…
-              </div>
-            ) : messages.length === 0 ? (
-              <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-tertiary">
-                Open a session to see messages. New messages will appear live without reload.
-              </div>
-            ) : (
-              <div className="flex flex-col gap-3 pb-4">
-                {messages.map((message) => (
-                  <MobileMessageBubble
-                    key={
-                      message.id ??
-                      `${message.role}-${message.timestamp ?? ""}-${message.tool_call_id ?? ""}`
+            <form
+              className="shrink-0 border-t border-current/10 bg-background-base px-3 py-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitComposer();
+              }}
+            >
+              {streamNote && streamStatus === "error" && (
+                <div className="mb-3 rounded-2xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  {streamNote}
+                </div>
+              )}
+              <div className="flex items-end gap-2">
+                <textarea
+                  value={composer}
+                  onChange={(event) => setComposer(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void submitComposer();
                     }
-                    message={message}
-                  />
-                ))}
+                  }}
+                  rows={1}
+                  placeholder="Message"
+                  className="max-h-32 min-h-[2.75rem] flex-1 resize-none rounded-3xl border border-current/10 bg-muted/20 px-4 py-2.5 text-sm outline-none transition focus:border-primary/40 focus:bg-background"
+                  disabled={sendBusy}
+                />
+                <Button
+                  type="submit"
+                  disabled={sendDisabled}
+                  size="icon"
+                  className="h-11 w-11 shrink-0 rounded-full"
+                  aria-label="Send message"
+                >
+                  {sendBusy ? <Spinner /> : <Send className="h-4 w-4" />}
+                </Button>
               </div>
-            )}
-          </div>
-
-          <form
-            className="shrink-0 border-t border-current/10 bg-background-base px-3 py-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submitComposer();
-            }}
-          >
-            {streamNote && streamStatus === "error" && (
-              <div className="mb-3 rounded-2xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                {streamNote}
-              </div>
-            )}
-            <div className="flex gap-2">
-              <textarea
-                value={composer}
-                onChange={(event) => setComposer(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void submitComposer();
-                  }
-                }}
-                rows={2}
-                placeholder={selectedSessionId ? "Send a message…" : "Select a session first"}
-                className={cn(
-                  "min-h-[3.5rem] flex-1 resize-none rounded-2xl border border-current/10 bg-muted/20 px-3 py-2 text-sm outline-none transition focus:border-primary/40 focus:bg-background",
-                  !selectedSessionId && "opacity-60",
-                )}
-                disabled={!selectedSessionId || sendBusy}
-              />
-              <Button type="submit" disabled={sendDisabled} className="self-end rounded-2xl px-4">
-                {sendBusy ? <Spinner /> : <Send className="h-4 w-4" />}
-                <span className="hidden sm:inline">Send</span>
-              </Button>
-            </div>
-          </form>
-        </main>
-      </div>
+            </form>
+          </>
+        )}
+      </main>
     </div>
   );
 }

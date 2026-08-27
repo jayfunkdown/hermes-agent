@@ -65,6 +65,30 @@ export function sessionDisplayLabel(session: SessionInfo | null | undefined): st
   return label || "Session";
 }
 
+export function sessionListTitle(session: SessionInfo | null | undefined): string {
+  if (!session) return "Session";
+  const title = session.title?.trim();
+  if (title && title !== "Untitled") return title;
+  return session.id;
+}
+
+export function sessionPreviewText(session: SessionInfo | null | undefined): string {
+  if (!session) return "No messages yet";
+  const preview = session.preview?.trim();
+  if (preview) return preview;
+  if (session.message_count > 0) return `${session.message_count} messages`;
+  return "No messages yet";
+}
+
+export function sessionInitials(session: SessionInfo | null | undefined): string {
+  const label = sessionListTitle(session);
+  const parts = label.split(/[\s_-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0]![0] ?? ""}${parts[1]![0] ?? ""}`.toUpperCase();
+  }
+  return label.slice(0, 2).toUpperCase() || "AG";
+}
+
 export function shouldCollapseMessage(message: SessionMessage): boolean {
   if (message.role === "tool") return true;
   if (message.tool_calls && message.tool_calls.length > 0) return true;
