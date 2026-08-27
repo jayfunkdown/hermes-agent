@@ -402,16 +402,16 @@ export default function MobileMirrorPage() {
             if (event.type === "hello") {
               const nextCursor = sessionStreamCursor(event, cursorRef.current);
               if (nextCursor > cursorRef.current) {
-                cursorRef.current = nextCursor;
                 await syncDelta(resolvedSessionId);
+                cursorRef.current = Math.max(cursorRef.current, nextCursor);
               }
               continue;
             }
             if (event.type === "message.appended") {
               const nextCursor = sessionStreamCursor(event, cursorRef.current);
               if (nextCursor > cursorRef.current) {
-                cursorRef.current = nextCursor;
                 await syncDelta(resolvedSessionId);
+                cursorRef.current = Math.max(cursorRef.current, nextCursor);
               }
             }
           }
