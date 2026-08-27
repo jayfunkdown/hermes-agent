@@ -1,7 +1,7 @@
 {
   "name": "Hermes Agent Hub",
   "short_name": "Agent Hub",
-  "description": "WhatsApp-style mobile hub for live Hermes agent conversations.",
+  "description": "Bot Mode mobile hub — same agents, live feeds, and sync as desktop Hermes.",
   "start_url": "./mobile",
   "scope": "./",
   "display": "standalone",

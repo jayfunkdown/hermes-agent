@@ -6,20 +6,27 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
 import { AuthWidget } from "@/components/AuthWidget";
 import { Markdown } from "@/components/Markdown";
+import { MobileBotRow } from "@/components/mobile/MobileBotRow";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { useMobileKeyboardInset } from "@/hooks/useMobileKeyboardInset";
-import { api, authedFetch, type SessionInfo, type SessionMessage } from "@/lib/api";
 import {
-  bumpSessionInList,
-  HUB_SESSION_POLL_MS,
+  ensureCanonicalChat,
+  useMobileBotActivity,
+  useMobileBotRoster,
+} from "@/hooks/useMobileBotRoster";
+import { api, authedFetch, type SessionMessage } from "@/lib/api";
+import {
+  canonicalChatSessionId,
+  displayName,
+  botRosterMeta,
+  type MobileBotRow as MobileBot,
+} from "@/lib/mobile-bot-roster";
+import { GatewayClient } from "@/lib/gatewayClient";
+import {
   latestMessageId,
   mergeSessionMessages,
   parseSessionStreamEvent,
-  sessionDisplayLabel,
-  sessionInitials,
-  sessionListTitle,
-  sessionPreviewText,
   sessionStreamCursor,
   shouldCollapseMessage,
   shouldShowThinkingIndicator,
@@ -27,7 +34,6 @@ import {
 } from "@/lib/mobile-session-sync";
 import { cn, timeAgo } from "@/lib/utils";
 
-const SESSION_LIMIT = 30;
 const STREAM_RETRY_BASE_MS = 1_000;
 const STREAM_RETRY_MAX_MS = 12_000;
 
@@ -61,119 +67,14 @@ async function* readSessionEventStream(
           .map((line) => line.slice(5).replace(/^ /, ""))
           .join("\n");
         const event = parseSessionStreamEvent(data);
-        if (event) {
-          yield event;
-        }
+        if (event) yield event;
         splitIndex = buffer.indexOf("\n\n");
       }
-
-      if (done) {
-        break;
-      }
-    }
-
-    const tail = buffer.trim();
-    if (tail) {
-      for (const block of tail.split(/\n\n+/)) {
-        const data = block
-          .split(/\r?\n/)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).replace(/^ /, ""))
-          .join("\n");
-        const event = parseSessionStreamEvent(data);
-        if (event) {
-          yield event;
-        }
-      }
+      if (done) break;
     }
   } finally {
     reader.releaseLock();
   }
-}
-
-function AgentHubRow({
-  session,
-  active,
-  onClick,
-}: {
-  session: SessionInfo;
-  active: boolean;
-  onClick: () => void;
-}) {
-  const title = sessionListTitle(session);
-  const preview = sessionPreviewText(session);
-  const initials = sessionInitials(session);
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={active ? "true" : undefined}
-      className={cn(
-        "flex w-full items-center gap-3 border-b border-current/5 px-4 py-3 text-left transition-colors",
-        active ? "bg-primary/10" : "hover:bg-muted/30",
-      )}
-    >
-      <div
-        className={cn(
-          "flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-sm font-semibold",
-          active ? "bg-primary text-primary-foreground" : "bg-muted text-foreground",
-        )}
-        aria-hidden
-      >
-        {initials}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
-          <span className="min-w-0 flex-1 truncate text-[0.95rem] font-medium text-foreground">
-            {title}
-          </span>
-          <span className="shrink-0 text-[0.7rem] text-text-tertiary">
-            {timeAgo(session.last_active)}
-          </span>
-        </div>
-        <div className="mt-0.5 flex items-center gap-2">
-          <p className="min-w-0 flex-1 truncate text-sm text-text-tertiary">{preview}</p>
-          {session.is_active ? (
-            <span className="h-2 w-2 shrink-0 rounded-full bg-success" aria-label="Live" />
-          ) : null}
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function ToolCallBlock({
-  toolCall,
-}: {
-  toolCall: { id: string; function: { name: string; arguments: string } };
-}) {
-  const [open, setOpen] = useState(false);
-  let args = toolCall.function.arguments;
-  try {
-    args = JSON.stringify(JSON.parse(args), null, 2);
-  } catch {
-    /* keep raw */
-  }
-
-  return (
-    <div className="mt-2 overflow-hidden rounded-2xl border border-warning/20 bg-warning/5">
-      <button
-        type="button"
-        onClick={() => setOpen((next) => !next)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-warning hover:bg-warning/10"
-        aria-expanded={open}
-      >
-        <span className="font-mono-ui font-medium">{toolCall.function.name}</span>
-        <span className="ml-auto truncate text-warning/50">{toolCall.id}</span>
-      </button>
-      {open && (
-        <pre className="overflow-x-auto whitespace-pre-wrap break-words border-t border-warning/20 px-3 py-2 font-mono text-xs leading-relaxed text-warning/90">
-          {args}
-        </pre>
-      )}
-    </div>
-  );
 }
 
 function ThinkingBubble() {
@@ -190,24 +91,26 @@ function ThinkingBubble() {
   );
 }
 
+function ActivityBubble({ label }: { label: string }) {
+  return (
+    <article className="flex w-full justify-center">
+      <div className="rounded-full border border-current/10 bg-muted/25 px-3 py-1 text-xs text-text-tertiary">
+        {label}
+      </div>
+    </article>
+  );
+}
+
 function ChatBubble({ message }: { message: SessionMessage }) {
-  if (message.display_kind === "hidden") {
-    return null;
-  }
+  if (message.display_kind === "hidden") return null;
 
   const collapseBody = shouldCollapseMessage(message);
   const body = message.content?.trim() ?? "";
-  const bodyPreview = body.length > 900 ? `${body.slice(0, 900).trim()}…` : body;
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
 
   return (
-    <article
-      className={cn(
-        "flex w-full",
-        isUser ? "justify-end" : isAssistant ? "justify-start" : "justify-center",
-      )}
-    >
+    <article className={cn("flex w-full", isUser ? "justify-end" : isAssistant ? "justify-start" : "justify-center")}>
       <div
         className={cn(
           "max-w-[min(88%,30rem)] rounded-2xl border px-3 py-2 shadow-sm",
@@ -224,15 +127,11 @@ function ChatBubble({ message }: { message: SessionMessage }) {
             {message.tool_name ? ` · ${message.tool_name}` : ""}
           </div>
         ) : null}
-
         {body ? (
           collapseBody ? (
             <details className="group">
               <summary className="cursor-pointer list-none text-sm text-foreground/90">
-                <span className="inline-flex items-center gap-2">
-                  <span>Show {message.role} message</span>
-                  <span className="max-w-[12rem] truncate text-xs text-text-tertiary">{bodyPreview}</span>
-                </span>
+                Show {message.role} message
               </summary>
               <div className="pt-2">
                 <Markdown content={body} />
@@ -246,22 +145,8 @@ function ChatBubble({ message }: { message: SessionMessage }) {
         ) : (
           <div className="text-sm text-text-tertiary">No text content.</div>
         )}
-
-        {message.tool_calls && message.tool_calls.length > 0 && (
-          <div className="mt-2 flex flex-col gap-2">
-            {message.tool_calls.map((toolCall) => (
-              <ToolCallBlock key={toolCall.id} toolCall={toolCall} />
-            ))}
-          </div>
-        )}
-
         {message.timestamp ? (
-          <div
-            className={cn(
-              "mt-1 text-[0.65rem] text-text-tertiary",
-              isUser ? "text-right" : "text-left",
-            )}
-          >
+          <div className={cn("mt-1 text-[0.65rem] text-text-tertiary", isUser ? "text-right" : "text-left")}>
             {timeAgo(message.timestamp)}
           </div>
         ) : null}
@@ -271,15 +156,18 @@ function ChatBubble({ message }: { message: SessionMessage }) {
 }
 
 export default function MobileMirrorPage() {
-  const { profile, currentProfile } = useProfileScope();
+  const { profile, currentProfile, setProfile } = useProfileScope();
   const [searchParams, setSearchParams] = useSearchParams();
+  const gatewayRef = useRef<GatewayClient | null>(null);
+  if (!gatewayRef.current) {
+    gatewayRef.current = new GatewayClient();
+  }
+  const gateway = gatewayRef.current;
 
   const sessionParam = searchParams.get("session") ?? "";
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(true);
-  const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [hubQuery, setHubQuery] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState(sessionParam);
+  const [selectedBotName, setSelectedBotName] = useState<string | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [streamStatus, setStreamStatus] = useState<"idle" | "connecting" | "live" | "reconnecting" | "error">("idle");
@@ -287,54 +175,73 @@ export default function MobileMirrorPage() {
   const [composer, setComposer] = useState("");
   const [sendBusy, setSendBusy] = useState(false);
   const [awaitingReply, setAwaitingReply] = useState(false);
+  const [openingBot, setOpeningBot] = useState<string | null>(null);
 
+  const { bots, loading: botsLoading, error: botsError, avatars, refresh: refreshBots } =
+    useMobileBotRoster(gateway);
   const keyboardInset = useMobileKeyboardInset();
 
   const selectedSessionRef = useRef(selectedSessionId);
   const resolvedSessionIdRef = useRef("");
   const cursorRef = useRef(0);
-  const statusAbortRef = useRef<AbortController | null>(null);
   const streamRunRef = useRef(0);
-  const documentTitleRef = useRef(document.title);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  const activeSession = useMemo(
-    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
-    [selectedSessionId, sessions],
+  const activeBot = useMemo(() => {
+    if (selectedBotName) {
+      return bots.find((bot) => bot.name === selectedBotName) ?? null;
+    }
+    if (!selectedSessionId) return null;
+    return (
+      bots.find((bot) => {
+        const canonical = canonicalChatSessionId(bot);
+        return canonical === selectedSessionId || bot.canonical_session?.id === selectedSessionId;
+      }) ?? null
+    );
+  }, [bots, selectedBotName, selectedSessionId]);
+
+  const scopedProfile = activeBot
+    ? activeBot.name === "default"
+      ? ""
+      : activeBot.name
+    : profile;
+
+  const { busy: gatewayBusy, activities } = useMobileBotActivity(
+    gateway,
+    selectedSessionId,
+    scopedProfile || "",
   );
 
-  const filteredSessions = useMemo(() => {
+  const filteredBots = useMemo(() => {
     const needle = hubQuery.trim().toLowerCase();
-    if (!needle) return sessions;
-    return sessions.filter((session) => {
-      const haystack = [
-        sessionListTitle(session),
-        sessionPreviewText(session),
-        session.id,
-        session.source ?? "",
-        session.model ?? "",
-      ]
+    if (!needle) return bots;
+    return bots.filter((bot) => {
+      const meta = botRosterMeta(bot);
+      const haystack = [displayName(bot, meta), bot.name, botHandleForSearch(bot), bot.description ?? ""]
         .join(" ")
         .toLowerCase();
       return haystack.includes(needle);
     });
-  }, [hubQuery, sessions]);
+  }, [bots, hubQuery]);
 
   const inChat = Boolean(selectedSessionId);
+  const busyBotName = gatewayBusy && activeBot ? activeBot.name : null;
 
   const statusText = useMemo(() => {
-    if (!selectedSessionId) return "Pick an agent to chat";
+    if (!selectedSessionId) return "Pick an agent";
     if (messagesLoading) return "Loading messages…";
+    if (gatewayBusy) return "Working…";
     if (streamStatus === "connecting") return "Connecting…";
     if (streamStatus === "reconnecting") return "Reconnecting…";
     if (streamStatus === "live") return "Live";
     if (streamStatus === "error") return streamNote ?? "Sync unavailable";
     return "Ready";
-  }, [messagesLoading, selectedSessionId, streamNote, streamStatus]);
+  }, [gatewayBusy, messagesLoading, selectedSessionId, streamNote, streamStatus]);
 
   const showThinking = useMemo(
-    () => shouldShowThinkingIndicator(messages, awaitingReply, streamStatus === "live"),
-    [awaitingReply, messages, streamStatus],
+    () =>
+      shouldShowThinkingIndicator(messages, awaitingReply || gatewayBusy, streamStatus === "live"),
+    [awaitingReply, gatewayBusy, messages, streamStatus],
   );
 
   useEffect(() => {
@@ -344,74 +251,25 @@ export default function MobileMirrorPage() {
   useEffect(() => {
     if (!inChat || messagesLoading) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [awaitingReply, inChat, messages, messagesLoading, showThinking]);
+  }, [activities, inChat, messages, messagesLoading, showThinking]);
 
-  const applyMessageDelta = useCallback(
-    async (sessionId: string, afterId: number, profileName: string) => {
-      const next = await api.getSessionMessagesSince(sessionId, afterId, profileName);
-      const incoming = next.messages ?? [];
-      if (incoming.length === 0) {
-        const revision = next.latest_message_id ?? next.revision ?? afterId;
-        if (revision > cursorRef.current) {
-          cursorRef.current = revision;
-        }
-        setSessions((prev) => bumpSessionInList(prev, sessionId));
-        return;
+  const applyMessageDelta = useCallback(async (sessionId: string, afterId: number, profileName: string) => {
+    const next = await api.getSessionMessagesSince(sessionId, afterId, profileName);
+    const incoming = next.messages ?? [];
+    if (incoming.length === 0) {
+      const revision = next.latest_message_id ?? next.revision ?? afterId;
+      if (revision > cursorRef.current) cursorRef.current = revision;
+      return;
+    }
+    setMessages((prev) => {
+      const merged = mergeSessionMessages(prev, incoming);
+      cursorRef.current = latestMessageId(merged);
+      if (incoming.some((message) => message.role === "assistant")) {
+        setAwaitingReply(false);
       }
-      setMessages((prev) => {
-        const merged = mergeSessionMessages(prev, incoming);
-        cursorRef.current = latestMessageId(merged);
-        setSessions((sessionsPrev) => bumpSessionInList(sessionsPrev, sessionId, merged));
-        if (incoming.some((message) => message.role === "assistant")) {
-          setAwaitingReply(false);
-        }
-        return merged;
-      });
-    },
-    [],
-  );
-
-  const reloadSessions = useCallback(() => {
-    setSessionsLoading(true);
-    setSessionsError(null);
-    return api
-      .getSessions(SESSION_LIMIT, 0, profile || "", "recent")
-      .then((res) => {
-        setSessions(res.sessions);
-      })
-      .catch((error: Error) => {
-        setSessionsError(error.message || "failed to load sessions");
-      })
-      .finally(() => {
-        setSessionsLoading(false);
-      });
-  }, [profile]);
-
-  useEffect(() => {
-    void reloadSessions();
-  }, [reloadSessions]);
-
-  useEffect(() => {
-    if (document.visibilityState !== "visible") return;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        void reloadSessions();
-      }
-    }, HUB_SESSION_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [reloadSessions]);
-
-  useEffect(() => {
-    const onVisibility = () => {
-      if (document.visibilityState !== "visible") return;
-      void reloadSessions();
-      const sessionId = resolvedSessionIdRef.current || selectedSessionRef.current;
-      if (!sessionId) return;
-      void applyMessageDelta(sessionId, cursorRef.current, profile || "");
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, [applyMessageDelta, profile, reloadSessions]);
+      return merged;
+    });
+  }, []);
 
   useEffect(() => {
     if (!sessionParam || sessionParam === selectedSessionId) return;
@@ -421,7 +279,6 @@ export default function MobileMirrorPage() {
   useEffect(() => {
     let cancelled = false;
     const sessionId = selectedSessionId.trim();
-
     if (!sessionId) {
       resolvedSessionIdRef.current = "";
       setMessages([]);
@@ -434,10 +291,7 @@ export default function MobileMirrorPage() {
     }
 
     const controller = new AbortController();
-    statusAbortRef.current?.abort();
-    statusAbortRef.current = controller;
     const runId = ++streamRunRef.current;
-
     setMessagesLoading(true);
     setStreamNote(null);
     setStreamStatus("connecting");
@@ -445,7 +299,7 @@ export default function MobileMirrorPage() {
     setMessages([]);
 
     const loadInitial = async () => {
-      const response = await api.getSessionMessages(sessionId, profile || "");
+      const response = await api.getSessionMessages(sessionId, scopedProfile || "");
       if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
 
       const resolvedSessionId = response.session_id || sessionId;
@@ -462,7 +316,6 @@ export default function MobileMirrorPage() {
       setMessages(initialMessages);
       cursorRef.current = latestMessageId(initialMessages);
       resolvedSessionIdRef.current = resolvedSessionId;
-      setSessions((prev) => bumpSessionInList(prev, resolvedSessionId, initialMessages));
       setMessagesLoading(false);
       setStreamStatus("live");
       return resolvedSessionId;
@@ -470,25 +323,19 @@ export default function MobileMirrorPage() {
 
     const syncDelta = async (resolvedSessionId: string, afterId: number) => {
       if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
-      await applyMessageDelta(resolvedSessionId, afterId, profile || "");
+      await applyMessageDelta(resolvedSessionId, afterId, scopedProfile || "");
     };
 
     const catchUpFromEvent = async (event: SessionStreamEvent, resolvedSessionId: string) => {
       const watermark = sessionStreamCursor(event, cursorRef.current);
-      if (watermark <= cursorRef.current) {
-        return;
-      }
+      if (watermark <= cursorRef.current) return;
       await syncDelta(resolvedSessionId, cursorRef.current);
     };
 
     const runStream = async (resolvedSessionId: string) => {
       let attempt = 0;
       while (!controller.signal.aborted && streamRunRef.current === runId) {
-        const streamUrl = api.getSessionEventsUrl(
-          resolvedSessionId,
-          profile || "",
-          cursorRef.current,
-        );
+        const streamUrl = api.getSessionEventsUrl(resolvedSessionId, scopedProfile || "", cursorRef.current);
         try {
           setStreamStatus(attempt === 0 ? "connecting" : "reconnecting");
           const response = await authedFetch(streamUrl, {
@@ -499,37 +346,27 @@ export default function MobileMirrorPage() {
           if (!response.ok || !response.body) {
             throw new Error(`stream unavailable (${response.status})`);
           }
-
           setStreamStatus("live");
           for await (const event of readSessionEventStream(response.body)) {
             if (controller.signal.aborted || streamRunRef.current !== runId) return;
-            if (event.type === "hello") {
-              await catchUpFromEvent(event, resolvedSessionId);
-              continue;
-            }
-            if (event.type === "message.appended") {
+            if (event.type === "hello" || event.type === "message.appended") {
               await catchUpFromEvent(event, resolvedSessionId);
             }
           }
-
           if (controller.signal.aborted || streamRunRef.current !== runId) return;
           attempt = 0;
         } catch (error) {
           if (controller.signal.aborted || streamRunRef.current !== runId) return;
-          const message = error instanceof Error ? error.message : String(error);
-          setStreamNote(message);
+          setStreamNote(error instanceof Error ? error.message : String(error));
           setStreamStatus("reconnecting");
-          const delay = streamRetryDelay(attempt++);
-          await sleep(delay);
+          await sleep(streamRetryDelay(attempt++));
         }
       }
     };
 
     void loadInitial()
       .then((resolved) => {
-        if (!resolved || cancelled || controller.signal.aborted || streamRunRef.current !== runId) {
-          return;
-        }
+        if (!resolved || cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
         void runStream(resolved);
       })
       .catch((error: Error) => {
@@ -543,32 +380,41 @@ export default function MobileMirrorPage() {
       cancelled = true;
       controller.abort();
     };
-  }, [applyMessageDelta, profile, selectedSessionId, setSearchParams]);
+  }, [applyMessageDelta, scopedProfile, selectedSessionId, setSearchParams]);
 
-  useEffect(() => {
-    const title = activeSession
-      ? `${sessionDisplayLabel(activeSession)} · Hermes`
-      : "Hermes Agent Hub";
-    document.title = title;
-    return () => {
-      document.title = documentTitleRef.current;
-    };
-  }, [activeSession]);
-
-  const pickSession = useCallback(
-    (id: string) => {
-      setSelectedSessionId(id);
-      setSearchParams((prev) => {
-        const next = new URLSearchParams(prev);
-        next.set("session", id);
-        return next;
-      }, { replace: false });
+  const openBot = useCallback(
+    async (bot: MobileBot) => {
+      setOpeningBot(bot.name);
+      try {
+        const profileName = bot.name === "default" ? "" : bot.name;
+        setProfile(profileName);
+        setSelectedBotName(bot.name);
+        let sessionId = canonicalChatSessionId(bot);
+        if (!sessionId) {
+          sessionId = await ensureCanonicalChat(gateway, bot.name);
+          await refreshBots();
+        }
+        setSelectedSessionId(sessionId);
+        setSearchParams((prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("session", sessionId);
+          if (profileName) next.set("profile", profileName);
+          else next.delete("profile");
+          return next;
+        }, { replace: false });
+      } catch (error) {
+        setStreamNote(error instanceof Error ? error.message : String(error));
+        setStreamStatus("error");
+      } finally {
+        setOpeningBot(null);
+      }
     },
-    [setSearchParams],
+    [gateway, refreshBots, setProfile, setSearchParams],
   );
 
   const leaveChat = useCallback(() => {
     setSelectedSessionId("");
+    setSelectedBotName(null);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete("session");
@@ -583,14 +429,13 @@ export default function MobileMirrorPage() {
     setAwaitingReply(true);
     try {
       setComposer("");
-      const result = await api.submitSessionMessage(selectedSessionId, text, profile || "");
-      const targetSessionId =
-        result.session_id || resolvedSessionIdRef.current || selectedSessionId;
+      const result = await api.submitSessionMessage(selectedSessionId, text, scopedProfile || "");
+      const targetSessionId = result.session_id || resolvedSessionIdRef.current || selectedSessionId;
       if (targetSessionId !== selectedSessionRef.current) {
         setAwaitingReply(false);
         return;
       }
-      await applyMessageDelta(targetSessionId, cursorRef.current, profile || "");
+      await applyMessageDelta(targetSessionId, cursorRef.current, scopedProfile || "");
       if (targetSessionId !== selectedSessionId) {
         resolvedSessionIdRef.current = targetSessionId;
         setSelectedSessionId(targetSessionId);
@@ -600,6 +445,7 @@ export default function MobileMirrorPage() {
           return next;
         }, { replace: true });
       }
+      void refreshBots();
     } catch (error) {
       setAwaitingReply(false);
       setStreamNote(error instanceof Error ? error.message : String(error));
@@ -607,20 +453,15 @@ export default function MobileMirrorPage() {
     } finally {
       setSendBusy(false);
     }
-  }, [applyMessageDelta, composer, profile, sendBusy, selectedSessionId, setSearchParams]);
+  }, [applyMessageDelta, composer, refreshBots, scopedProfile, sendBusy, selectedSessionId, setSearchParams]);
 
   const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy;
-  const profileLabel =
-    currentProfile === profile || !profile ? currentProfile || "default" : profile;
+  const profileLabel = currentProfile === profile || !profile ? currentProfile || "default" : profile;
+  const chatTitle = activeBot ? displayName(activeBot, botRosterMeta(activeBot)) : "Agent";
 
   return (
     <div className="flex h-dvh min-h-0 overflow-hidden bg-background-base text-foreground">
-      <aside
-        className={cn(
-          "flex min-h-0 w-full flex-col border-current/10 bg-background-base lg:w-[min(100%,24rem)] lg:border-r",
-          inChat && "hidden lg:flex",
-        )}
-      >
+      <aside className={cn("flex min-h-0 w-full flex-col border-current/10 bg-background-base lg:w-[min(100%,24rem)] lg:border-r", inChat && "hidden lg:flex")}>
         <header className="shrink-0 border-b border-current/10 px-4 py-3">
           <div className="flex items-center gap-2">
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/15 text-primary">
@@ -628,16 +469,10 @@ export default function MobileMirrorPage() {
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-lg font-semibold text-foreground">Agent Hub</div>
-              <div className="truncate text-xs text-text-tertiary">{profileLabel}</div>
+              <div className="truncate text-xs text-text-tertiary">Bot Mode · {profileLabel}</div>
             </div>
-            <Button
-              ghost
-              size="icon"
-              onClick={reloadSessions}
-              aria-label="Refresh agents"
-              title="Refresh agents"
-            >
-              <RefreshCw className={cn(sessionsLoading && "animate-spin")} />
+            <Button ghost size="icon" onClick={() => void refreshBots()} aria-label="Refresh agents">
+              <RefreshCw className={cn(botsLoading && "animate-spin")} />
             </Button>
           </div>
           <div className="mt-3 flex items-center gap-2 rounded-2xl border border-current/10 bg-muted/20 px-3 py-2">
@@ -653,36 +488,42 @@ export default function MobileMirrorPage() {
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {sessionsError ? (
+          {botsError ? (
             <div className="flex flex-col gap-2 p-4">
               <div className="flex items-start gap-2 rounded-2xl border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                <span className="break-words">{sessionsError}</span>
+                <span>{botsError}</span>
               </div>
-              <Button outlined size="sm" onClick={reloadSessions} prefix={<RefreshCw />}>
+              <Button outlined size="sm" onClick={() => void refreshBots()} prefix={<RefreshCw />}>
                 Retry
               </Button>
             </div>
-          ) : sessionsLoading && sessions.length === 0 ? (
+          ) : botsLoading && bots.length === 0 ? (
             <div className="flex items-center justify-center gap-2 py-12 text-sm text-text-tertiary">
               <Spinner /> Loading agents…
             </div>
-          ) : filteredSessions.length === 0 ? (
+          ) : filteredBots.length === 0 ? (
             <div className="px-6 py-12 text-center text-sm text-text-tertiary">
-              {hubQuery.trim() ? "No agents match your search." : "No agents found for this profile."}
+              {hubQuery.trim() ? "No agents match your search." : "No Bot Mode agents found."}
             </div>
           ) : (
-            <div>
-              {filteredSessions.map((session) => (
-                <AgentHubRow
-                  key={session.id}
-                  session={session}
-                  active={session.id === selectedSessionId}
-                  onClick={() => pickSession(session.id)}
-                />
-              ))}
-            </div>
+            filteredBots.map((bot) => (
+              <MobileBotRow
+                key={bot.name}
+                bot={bot}
+                active={bot.name === activeBot?.name}
+                avatarUrl={avatars[bot.name]}
+                activeProfile={scopedProfile || "default"}
+                busyBotName={busyBotName}
+                onClick={() => void openBot(bot)}
+              />
+            ))
           )}
+          {openingBot ? (
+            <div className="px-4 py-2 text-xs text-text-tertiary">
+              Opening {openingBot}…
+            </div>
+          ) : null}
         </div>
 
         <footer className="shrink-0 space-y-2 border-t border-current/10 px-4 py-3">
@@ -691,48 +532,27 @@ export default function MobileMirrorPage() {
         </footer>
       </aside>
 
-      <main
-        className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent_12rem)]",
-          !inChat && "hidden lg:flex",
-        )}
-      >
+      <main className={cn("flex min-h-0 min-w-0 flex-1 flex-col", !inChat && "hidden lg:flex")}>
         {!inChat ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center text-text-tertiary">
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted/30 text-foreground/70">
               <Bot className="h-8 w-8" />
             </div>
             <div className="text-lg font-medium text-foreground">Hermes Agent Hub</div>
-            <p className="max-w-sm text-sm">
-              Pick an agent conversation to mirror live messages from your cloud Hermes backend.
-            </p>
+            <p className="max-w-sm text-sm">Tap an agent to open its canonical Bot Chat live feed.</p>
           </div>
         ) : (
           <>
             <header className="flex shrink-0 items-center gap-2 border-b border-current/10 px-3 py-2">
-              <Button
-                ghost
-                size="icon"
-                onClick={leaveChat}
-                aria-label="Back to agents"
-                className="lg:hidden"
-              >
+              <Button ghost size="icon" onClick={leaveChat} aria-label="Back to agents" className="lg:hidden">
                 <ArrowLeft />
               </Button>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-semibold text-foreground">
-                  {sessionDisplayLabel(activeSession)}
-                </div>
+                <div className="truncate text-sm font-semibold text-foreground">{chatTitle}</div>
                 <div className="truncate text-[0.7rem] text-text-tertiary">{statusText}</div>
               </div>
-              <Button
-                ghost
-                size="icon"
-                onClick={reloadSessions}
-                aria-label="Refresh agents"
-                title="Refresh agents"
-              >
-                <RefreshCw className={cn(sessionsLoading && "animate-spin")} />
+              <Button ghost size="icon" onClick={() => void refreshBots()} aria-label="Refresh agents">
+                <RefreshCw className={cn(botsLoading && "animate-spin")} />
               </Button>
             </header>
 
@@ -740,10 +560,6 @@ export default function MobileMirrorPage() {
               {messagesLoading && messages.length === 0 ? (
                 <div className="flex h-full items-center justify-center gap-2 text-sm text-text-tertiary">
                   <Spinner /> Loading messages…
-                </div>
-              ) : messages.length === 0 ? (
-                <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-tertiary">
-                  Send a message to start this conversation.
                 </div>
               ) : (
                 <div className="flex flex-col gap-2 pb-4">
@@ -755,6 +571,9 @@ export default function MobileMirrorPage() {
                       }
                       message={message}
                     />
+                  ))}
+                  {activities.map((item) => (
+                    <ActivityBubble key={item.id} label={item.label} />
                   ))}
                   {showThinking ? <ThinkingBubble /> : null}
                   <div ref={messagesEndRef} />
@@ -772,11 +591,11 @@ export default function MobileMirrorPage() {
                 void submitComposer();
               }}
             >
-              {streamNote && streamStatus === "error" && (
+              {streamNote && streamStatus === "error" ? (
                 <div className="mb-3 rounded-2xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
                   {streamNote}
                 </div>
-              )}
+              ) : null}
               <div className="flex items-end gap-2">
                 <textarea
                   value={composer}
@@ -792,13 +611,7 @@ export default function MobileMirrorPage() {
                   className="max-h-32 min-h-[2.75rem] flex-1 resize-none rounded-3xl border border-current/10 bg-muted/20 px-4 py-2.5 text-sm outline-none transition focus:border-primary/40 focus:bg-background"
                   disabled={sendBusy}
                 />
-                <Button
-                  type="submit"
-                  disabled={sendDisabled}
-                  size="icon"
-                  className="h-11 w-11 shrink-0 rounded-full"
-                  aria-label="Send message"
-                >
+                <Button type="submit" disabled={sendDisabled} size="icon" className="h-11 w-11 shrink-0 rounded-full" aria-label="Send message">
                   {sendBusy ? <Spinner /> : <Send className="h-4 w-4" />}
                 </Button>
               </div>
@@ -808,4 +621,8 @@ export default function MobileMirrorPage() {
       </main>
     </div>
   );
+}
+
+function botHandleForSearch(bot: MobileBot): string {
+  return bot.name === "default" ? "hermes" : bot.name;
 }
