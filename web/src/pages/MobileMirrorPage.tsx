@@ -10,6 +10,7 @@ import {
   AgentDeliveryToolNotice,
 } from "@/components/mobile/AgentDeliveryNotice";
 import { AgentActivityNotice } from "@/components/mobile/AgentActivityNotice";
+import { MobileChatErrorBoundary } from "@/components/mobile/MobileChatErrorBoundary";
 import { MobileBotRow } from "@/components/mobile/MobileBotRow";
 import { MobileHubFooter } from "@/components/mobile/MobileHubFooter";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -29,6 +30,12 @@ import {
   type MobileBotRow as MobileBot,
 } from "@/lib/mobile-bot-roster";
 import { renderMobileSessionMessages } from "@/lib/mobile-agent-delivery-render";
+import { normalizeSessionMessages } from "@/lib/mobile-chat-message";
+import {
+  MOBILE_CHAT_PAGE_SIZE,
+  hasMoreEarlierMessages,
+  nextEarlierOffset,
+} from "@/lib/mobile-chat-pagination";
 import {
   MOBILE_CHAT_EMPTY_TEXT,
   MOBILE_CHAT_LOAD_TIMEOUT_MS,
@@ -109,7 +116,20 @@ function ThinkingBubble() {
   );
 }
 
+function MalformedMessagePlaceholder({ messageId }: { messageId?: number }) {
+  return (
+    <article className="flex w-full justify-center">
+      <div className="max-w-[min(88%,30rem)] rounded-2xl border border-warning/20 bg-warning/8 px-3 py-2 text-sm text-text-tertiary">
+        Message could not be displayed{messageId ? ` (#${messageId})` : ""}.
+      </div>
+    </article>
+  );
+}
+
 function ChatBubble({ message }: { message: SessionMessage }) {
+  if (!message || typeof message !== "object") {
+    return <MalformedMessagePlaceholder />;
+  }
   if (message.display_kind === "hidden") return null;
 
   const collapseBody = shouldCollapseMessage(message);
@@ -178,6 +198,9 @@ export default function MobileMirrorPage() {
   const [selectedSessionId, setSelectedSessionId] = useState(sessionParam);
   const [selectedBotName, setSelectedBotName] = useState<string | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [earlierOffset, setEarlierOffset] = useState(0);
+  const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [streamStatus, setStreamStatus] = useState<"idle" | "connecting" | "live" | "reconnecting" | "error">("idle");
   const [streamNote, setStreamNote] = useState<string | null>(null);
@@ -210,6 +233,8 @@ export default function MobileMirrorPage() {
   const cursorRef = useRef(0);
   const streamRunRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const prevLastMessageIdRef = useRef<number | null>(null);
 
   const rosterForDelivery = allBots.length > 0 ? allBots : bots;
 
@@ -238,7 +263,10 @@ export default function MobileMirrorPage() {
     scopedProfile || "",
   );
 
-  const renderedMessages = useMemo(() => renderMobileSessionMessages(messages), [messages]);
+  const renderedMessages = useMemo(
+    () => renderMobileSessionMessages(normalizeSessionMessages(messages)),
+    [messages],
+  );
 
   const hubBots = hubView === "archived" ? hiddenBots : bots;
 
@@ -312,9 +340,17 @@ export default function MobileMirrorPage() {
   }, [selectedBotName]);
 
   useEffect(() => {
-    if (!inChat || messagesLoading) return;
+    prevLastMessageIdRef.current = null;
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!inChat || messagesLoading || loadingEarlier) return;
+    const lastId = messages[messages.length - 1]?.id ?? null;
+    const prevLastId = prevLastMessageIdRef.current;
+    prevLastMessageIdRef.current = lastId;
+    if (lastId === prevLastId) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [activities, inChat, messages, messagesLoading, showThinking]);
+  }, [activities, inChat, loadingEarlier, messages, messagesLoading, showThinking]);
 
   const applyMessageDelta = useCallback(async (sessionId: string, afterId: number, profileName: string) => {
     const next = await api.getSessionMessagesSince(
@@ -362,9 +398,12 @@ export default function MobileMirrorPage() {
       setMessagesLoading(false);
       setStreamStatus("idle");
       setStreamNote(null);
-      setChatLoadFailed(false);
-      setAwaitingReply(false);
-      cursorRef.current = 0;
+    setChatLoadFailed(false);
+    setAwaitingReply(false);
+    setEarlierOffset(0);
+    setHasEarlierMessages(false);
+    setLoadingEarlier(false);
+    cursorRef.current = 0;
       return;
     }
 
@@ -375,11 +414,17 @@ export default function MobileMirrorPage() {
     setChatLoadFailed(false);
     setStreamStatus("connecting");
     cursorRef.current = 0;
+    setEarlierOffset(0);
+    setHasEarlierMessages(false);
+    setLoadingEarlier(false);
     setMessages([]);
 
     const loadInitial = async (attemptSessionId: string, repaired = false): Promise<string | undefined> => {
       try {
-        const response = await api.getSessionMessages(attemptSessionId, scopedProfile || "");
+        const response = await api.getMobileSessionMessages(attemptSessionId, scopedProfile || "", {
+          limit: MOBILE_CHAT_PAGE_SIZE,
+          offset: 0,
+        });
         if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
 
         const resolvedSessionId = response.session_id || attemptSessionId;
@@ -394,6 +439,8 @@ export default function MobileMirrorPage() {
 
         const initialMessages = response.messages ?? [];
         setMessages(initialMessages);
+        setEarlierOffset(nextEarlierOffset(0, initialMessages.length));
+        setHasEarlierMessages(hasMoreEarlierMessages(initialMessages.length));
         cursorRef.current = latestMessageId(initialMessages);
         resolvedSessionIdRef.current = resolvedSessionId;
         setMessagesLoading(false);
@@ -482,6 +529,41 @@ export default function MobileMirrorPage() {
       controller.abort();
     };
   }, [applyMessageDelta, gateway, refreshBots, scopedProfile, selectedSessionId, setSearchParams]);
+
+  const handleLoadEarlier = useCallback(async () => {
+    const sessionId = selectedSessionId.trim();
+    if (!sessionId || !hasEarlierMessages || loadingEarlier || chatLoadFailed) return;
+
+    const container = scrollContainerRef.current;
+    const prevScrollHeight = container?.scrollHeight ?? 0;
+    setLoadingEarlier(true);
+    try {
+      const response = await api.getMobileSessionMessages(sessionId, scopedProfile || "", {
+        limit: MOBILE_CHAT_PAGE_SIZE,
+        offset: earlierOffset,
+      });
+      if (sessionId !== selectedSessionRef.current) return;
+
+      const batch = response.messages ?? [];
+      setMessages((prev) => {
+        const prevIds = new Set(prev.map((message) => message.id));
+        const toPrepend = batch.filter((message) => !prevIds.has(message.id));
+        if (toPrepend.length === 0) return prev;
+        return mergeSessionMessages(toPrepend, prev);
+      });
+      setEarlierOffset(nextEarlierOffset(earlierOffset, batch.length));
+      setHasEarlierMessages(hasMoreEarlierMessages(batch.length));
+      requestAnimationFrame(() => {
+        if (!container) return;
+        container.scrollTop += container.scrollHeight - prevScrollHeight;
+      });
+    } catch (error) {
+      setStreamNote(formatMobileError(error));
+      setStreamStatus("error");
+    } finally {
+      setLoadingEarlier(false);
+    }
+  }, [chatLoadFailed, earlierOffset, hasEarlierMessages, loadingEarlier, scopedProfile, selectedSessionId]);
 
   const openBot = useCallback(
     async (bot: MobileBot) => {
@@ -762,7 +844,7 @@ export default function MobileMirrorPage() {
               </Button>
             </header>
 
-            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+            <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
               {showChatLoadingSpinner ? (
                 <div className="flex h-full items-center justify-center gap-2 text-sm text-text-tertiary">
                   <Spinner /> Loading messages…
@@ -782,56 +864,74 @@ export default function MobileMirrorPage() {
                   </Button>
                 </div>
               ) : (
-                <div className="flex flex-col gap-2 pb-4">
-                  {showChatEmptyState ? (
-                    <div className="flex flex-1 items-center justify-center px-6 py-10 text-center text-sm text-text-tertiary">
-                      {MOBILE_CHAT_EMPTY_TEXT}
-                    </div>
-                  ) : null}
-                  {renderedMessages.map((item) => {
-                    if (item.kind === "agent-receive") {
-                      return (
-                        <AgentDeliveryNotice
-                          key={item.key}
-                          sender={item.parsed.sender}
-                          handle={item.parsed.handle}
-                          body={item.parsed.body}
-                          gateway={gateway}
-                          rosterAvatars={avatars}
-                          bots={rosterForDelivery}
-                        />
-                      );
-                    }
-                    if (item.kind === "agent-send") {
-                      return (
-                        <AgentDeliveryToolNotice
-                          key={item.key}
-                          target={item.delivery.target}
-                          pending={item.delivery.pending}
-                          replyBody={item.delivery.replyBody}
-                          gateway={gateway}
-                          rosterAvatars={avatars}
-                          bots={rosterForDelivery}
-                        />
-                      );
-                    }
-                    if (item.kind === "activity-notice") {
-                      return (
-                        <AgentActivityNotice
-                          key={item.key}
-                          label={item.label}
-                          pending={item.pending}
-                        />
-                      );
-                    }
-                    return <ChatBubble key={item.key} message={item.message} />;
-                  })}
-                  {activities.map((item) => (
-                    <AgentActivityNotice key={item.id} label={item.label} pending={item.pending} />
-                  ))}
-                  {showThinking ? <ThinkingBubble /> : null}
-                  <div ref={messagesEndRef} />
-                </div>
+                <MobileChatErrorBoundary
+                  onReload={() => {
+                    if (activeBot) void openBot(activeBot);
+                  }}
+                >
+                  <div className="flex flex-col gap-2 pb-4">
+                    {hasEarlierMessages ? (
+                      <div className="flex justify-center pb-1">
+                        <Button
+                          outlined
+                          size="sm"
+                          disabled={loadingEarlier}
+                          onClick={() => void handleLoadEarlier()}
+                        >
+                          {loadingEarlier ? "Loading earlier…" : "Load earlier messages"}
+                        </Button>
+                      </div>
+                    ) : null}
+                    {showChatEmptyState ? (
+                      <div className="flex flex-1 items-center justify-center px-6 py-10 text-center text-sm text-text-tertiary">
+                        {MOBILE_CHAT_EMPTY_TEXT}
+                      </div>
+                    ) : null}
+                    {renderedMessages.map((item) => {
+                      if (item.kind === "agent-receive") {
+                        return (
+                          <AgentDeliveryNotice
+                            key={item.key}
+                            sender={item.parsed.sender}
+                            handle={item.parsed.handle}
+                            body={item.parsed.body}
+                            gateway={gateway}
+                            rosterAvatars={avatars}
+                            bots={rosterForDelivery}
+                          />
+                        );
+                      }
+                      if (item.kind === "agent-send") {
+                        return (
+                          <AgentDeliveryToolNotice
+                            key={item.key}
+                            target={item.delivery.target}
+                            pending={item.delivery.pending}
+                            replyBody={item.delivery.replyBody}
+                            gateway={gateway}
+                            rosterAvatars={avatars}
+                            bots={rosterForDelivery}
+                          />
+                        );
+                      }
+                      if (item.kind === "activity-notice") {
+                        return (
+                          <AgentActivityNotice
+                            key={item.key}
+                            label={item.label}
+                            pending={item.pending}
+                          />
+                        );
+                      }
+                      return <ChatBubble key={item.key} message={item.message} />;
+                    })}
+                    {activities.map((item) => (
+                      <AgentActivityNotice key={item.id} label={item.label} pending={item.pending} />
+                    ))}
+                    {showThinking ? <ThinkingBubble /> : null}
+                    <div ref={messagesEndRef} />
+                  </div>
+                </MobileChatErrorBoundary>
               )}
             </div>
 

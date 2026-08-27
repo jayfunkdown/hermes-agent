@@ -1,4 +1,5 @@
 import { buildHermesWebSocketUrl } from "@hermes/shared";
+import { buildMobileSessionMessagesQuery } from "@/lib/mobile-chat-pagination";
 
 // The dashboard can be served either at the root of its host (e.g.
 // https://kanban.tilos.com/) or under a URL prefix when reverse-proxied
@@ -387,6 +388,18 @@ export const api = {
     fetchJSON<SessionMessagesResponse>(
       appendProfileParam(
         `/api/sessions/${encodeURIComponent(id)}/messages?limit=500&order=latest`,
+        profile,
+      ),
+    ),
+  /** Mobile mirror only: bounded window with offset pagination (desktop keeps getSessionMessages). */
+  getMobileSessionMessages: (
+    id: string,
+    profile = getManagementProfile(),
+    options: { limit?: number; offset?: number } = {},
+  ) =>
+    fetchJSON<SessionMessagesResponse>(
+      appendProfileParam(
+        `/api/sessions/${encodeURIComponent(id)}/messages?${buildMobileSessionMessagesQuery(options)}`,
         profile,
       ),
     ),
