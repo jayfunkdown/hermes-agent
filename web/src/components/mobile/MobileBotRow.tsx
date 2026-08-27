@@ -1,3 +1,5 @@
+import { EyeOff } from "lucide-react";
+
 import { BotFace } from "@/components/mobile/BotFace";
 import {
   botAppearance,
@@ -14,6 +16,7 @@ import { cn, timeAgo } from "@/lib/utils";
 interface MobileBotRowProps {
   bot: MobileBotRow;
   active: boolean;
+  hidden?: boolean;
   avatarUrl?: string | null;
   activeProfile: string;
   busyBotName: string | null;
@@ -23,6 +26,7 @@ interface MobileBotRowProps {
 export function MobileBotRow({
   bot,
   active,
+  hidden = false,
   avatarUrl,
   activeProfile,
   busyBotName,
@@ -44,21 +48,25 @@ export function MobileBotRow({
       className={cn(
         "flex w-full items-center gap-3 border-b border-current/5 px-4 py-3 text-left transition-colors",
         active ? "bg-primary/10" : "hover:bg-muted/30",
+        hidden && "opacity-70",
       )}
     >
-      <BotFace
-        shape={shape}
-        color={color}
-        image={avatarUrl || image}
-        name={bot.name}
-        mood={mood}
-        size={48}
-      />
+      <div className={cn("shrink-0", hidden && "grayscale")}>
+        <BotFace
+          shape={shape}
+          color={color}
+          image={avatarUrl || image}
+          name={bot.name}
+          mood={mood}
+          size={48}
+        />
+      </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
           <span className="min-w-0 flex-1 truncate text-[0.95rem] font-medium text-foreground">
             {displayName(bot, meta)}
           </span>
+          {hidden ? <EyeOff className="h-3.5 w-3.5 shrink-0 text-text-tertiary" aria-label="Hidden from roster" /> : null}
           {lastActive ? (
             <span className="shrink-0 text-[0.7rem] text-text-tertiary">
               {timeAgo(lastActive)}

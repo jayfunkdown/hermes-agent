@@ -7,6 +7,7 @@ import {
   botRowPreview,
   canonicalChatSessionId,
   displayName,
+  partitionBotsForHub,
   sortBotsForHub,
   stripAgentPreview,
   type MobileBotRow,
@@ -59,6 +60,28 @@ describe("mobile-bot-roster", () => {
       }),
     ]);
     expect(rows.map((row) => row.name)).toEqual(["pinned", "recent"]);
+  });
+
+  it("partitions hidden bots into a recoverable hidden section", () => {
+    const rows = partitionBotsForHub([
+      bot({ name: "alpha" }),
+      bot({ name: "ghost", ui_meta: { "hermes-bots": { hidden: true } } }),
+    ]);
+    expect(rows.visible.map((row) => row.name)).toEqual(["alpha"]);
+    expect(rows.hidden.map((row) => row.name)).toEqual(["ghost"]);
+    expect(rows.hiddenCount).toBe(1);
+  });
+
+  it("filters hidden and visible bots together when searching", () => {
+    const rows = partitionBotsForHub(
+      [
+        bot({ name: "alpha", ui_meta: { "hermes-bots": { title: "Alpha" } } }),
+        bot({ name: "ghost", ui_meta: { "hermes-bots": { hidden: true, title: "Ghost" } } }),
+      ],
+      "ghost",
+    );
+    expect(rows.visible).toHaveLength(0);
+    expect(rows.hidden.map((row) => row.name)).toEqual(["ghost"]);
   });
 
   it("maps gateway activity events to labels", () => {

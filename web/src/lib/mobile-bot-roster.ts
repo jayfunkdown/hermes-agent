@@ -179,6 +179,40 @@ export function sortBotsForHub(bots: MobileBotRow[]): MobileBotRow[] {
   });
 }
 
+export function botMatchesHubQuery(bot: MobileBotRow, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  const meta = botRosterMeta(bot);
+  const haystack = [
+    displayName(bot, meta),
+    bot.name,
+    botHandle(bot.name, bot),
+    bot.description ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(needle);
+}
+
+export function partitionBotsForHub(bots: MobileBotRow[], query = "") {
+  const sorted = sortBotsForHub(bots);
+  const visible: MobileBotRow[] = [];
+  const hidden: MobileBotRow[] = [];
+  for (const bot of sorted) {
+    if (!botMatchesHubQuery(bot, query)) continue;
+    if (isBotHidden(bot)) {
+      hidden.push(bot);
+    } else {
+      visible.push(bot);
+    }
+  }
+  return {
+    visible,
+    hidden,
+    hiddenCount: bots.filter((bot) => isBotHidden(bot)).length,
+  };
+}
+
 export function activityLabelForGatewayEvent(type: string, payload: unknown): string | null {
   const data =
     payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};

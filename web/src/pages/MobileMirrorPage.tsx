@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { AlertCircle, ArrowLeft, Bot, RefreshCw, Search, Send } from "lucide-react";
+import { AlertCircle, ArrowLeft, Bot, ChevronDown, ChevronRight, EyeOff, RefreshCw, Search, Send } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
@@ -24,6 +24,7 @@ import {
   canonicalChatSessionId,
   displayName,
   botRosterMeta,
+  partitionBotsForHub,
   type MobileBotRow as MobileBot,
 } from "@/lib/mobile-bot-roster";
 import { renderMobileSessionMessages } from "@/lib/mobile-agent-delivery-render";
@@ -181,6 +182,7 @@ export default function MobileMirrorPage() {
   const [sendBusy, setSendBusy] = useState(false);
   const [awaitingReply, setAwaitingReply] = useState(false);
   const [openingBot, setOpeningBot] = useState<string | null>(null);
+  const [showHiddenBots, setShowHiddenBots] = useState(false);
 
   const { bots, loading: botsLoading, error: botsError, avatars, refresh: refreshBots } =
     useMobileBotRoster(gateway);
@@ -219,17 +221,13 @@ export default function MobileMirrorPage() {
 
   const renderedMessages = useMemo(() => renderMobileSessionMessages(messages), [messages]);
 
-  const filteredBots = useMemo(() => {
-    const needle = hubQuery.trim().toLowerCase();
-    if (!needle) return bots;
-    return bots.filter((bot) => {
-      const meta = botRosterMeta(bot);
-      const haystack = [displayName(bot, meta), bot.name, botHandleForSearch(bot), bot.description ?? ""]
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(needle);
-    });
-  }, [bots, hubQuery]);
+  const hubQueryActive = Boolean(hubQuery.trim());
+  const { visible: visibleBots, hidden: hiddenBots, hiddenCount } = useMemo(
+    () => partitionBotsForHub(bots, hubQuery),
+    [bots, hubQuery],
+  );
+  const showHiddenRows = showHiddenBots || hubQueryActive;
+  const allBotsHidden = bots.length > 0 && hiddenCount === bots.length;
 
   const inChat = Boolean(selectedSessionId);
   const busyBotName = gatewayBusy && activeBot ? activeBot.name : null;
@@ -509,22 +507,70 @@ export default function MobileMirrorPage() {
             <div className="flex items-center justify-center gap-2 py-12 text-sm text-text-tertiary">
               <Spinner /> Loading agents…
             </div>
-          ) : filteredBots.length === 0 ? (
+          ) : allBotsHidden && !showHiddenRows ? (
+            <div className="flex flex-col gap-3 px-4 py-8 text-sm text-text-tertiary">
+              <div className="flex items-center gap-2 font-medium text-foreground/80">
+                <EyeOff className="h-4 w-4 text-text-tertiary" />
+                All agents are hidden
+              </div>
+              <p className="leading-relaxed">They keep working and retain their history.</p>
+              <Button outlined size="sm" onClick={() => setShowHiddenBots(true)} className="self-start">
+                Show hidden agents
+              </Button>
+            </div>
+          ) : visibleBots.length === 0 && hiddenBots.length === 0 ? (
             <div className="px-6 py-12 text-center text-sm text-text-tertiary">
-              {hubQuery.trim() ? "No agents match your search." : "No Bot Mode agents found."}
+              {hubQueryActive ? "No agents match your search." : "No Bot Mode agents found."}
             </div>
           ) : (
-            filteredBots.map((bot) => (
-              <MobileBotRow
-                key={bot.name}
-                bot={bot}
-                active={bot.name === activeBot?.name}
-                avatarUrl={avatars[bot.name]}
-                activeProfile={scopedProfile || "default"}
-                busyBotName={busyBotName}
-                onClick={() => void openBot(bot)}
-              />
-            ))
+            <>
+              {visibleBots.map((bot) => (
+                <MobileBotRow
+                  key={bot.name}
+                  bot={bot}
+                  active={bot.name === activeBot?.name}
+                  avatarUrl={avatars[bot.name]}
+                  activeProfile={scopedProfile || "default"}
+                  busyBotName={busyBotName}
+                  onClick={() => void openBot(bot)}
+                />
+              ))}
+              {hiddenCount > 0 ? (
+                <div className="mt-1 border-t border-current/10 pt-1">
+                  <button
+                    type="button"
+                    aria-expanded={showHiddenRows}
+                    onClick={() => setShowHiddenBots((open) => !open)}
+                    className="flex w-full items-center gap-2 px-4 py-2 text-left text-[0.6875rem] font-medium text-text-tertiary transition-colors hover:bg-muted/20"
+                  >
+                    {showHiddenRows ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                    <EyeOff className="h-3.5 w-3.5" />
+                    <span>Hidden</span>
+                    <span className="text-text-tertiary/70">{hiddenCount}</span>
+                  </button>
+                  {showHiddenRows ? (
+                    hiddenBots.length > 0 ? (
+                      hiddenBots.map((bot) => (
+                        <MobileBotRow
+                          key={`hidden:${bot.name}`}
+                          bot={bot}
+                          hidden
+                          active={bot.name === activeBot?.name}
+                          avatarUrl={avatars[bot.name]}
+                          activeProfile={scopedProfile || "default"}
+                          busyBotName={busyBotName}
+                          onClick={() => void openBot(bot)}
+                        />
+                      ))
+                    ) : (
+                      <div className="px-4 py-2 text-xs text-text-tertiary">
+                        No hidden agents match your search.
+                      </div>
+                    )
+                  ) : null}
+                </div>
+              ) : null}
+            </>
           )}
           {openingBot ? (
             <div className="px-4 py-2 text-xs text-text-tertiary">
@@ -648,8 +694,4 @@ export default function MobileMirrorPage() {
       </main>
     </div>
   );
-}
-
-function botHandleForSearch(bot: MobileBot): string {
-  return bot.name === "default" ? "hermes" : bot.name;
 }

@@ -6,7 +6,6 @@ import {
   activityLabelForGatewayEvent,
   BOT_ROSTER_POLL_MS,
   CANONICAL_CHAT_TITLE,
-  isBotHidden,
   sortBotsForHub,
   type MobileBotRow,
   type ProfilesListResult,
@@ -26,10 +25,10 @@ export function useMobileBotRoster(gateway: GatewayClient | null) {
     setError(null);
     try {
       const result = await gateway.request<ProfilesListResult>("profiles.list", {});
-      const visible = sortBotsForHub((result.profiles ?? []).filter((bot) => !isBotHidden(bot)));
-      setBots(visible);
+      const roster = sortBotsForHub(result.profiles ?? []);
+      setBots(roster);
 
-      for (const bot of visible) {
+      for (const bot of roster) {
         if (!bot.has_avatar || avatarFetchedRef.current.has(bot.name)) {
           continue;
         }
