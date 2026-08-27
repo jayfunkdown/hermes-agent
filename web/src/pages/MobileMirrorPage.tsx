@@ -224,11 +224,24 @@ function MobileMessageBubble({ message }: { message: SessionMessage }) {
   );
 }
 
-async function sendSessionPrompt(sessionId: string, text: string): Promise<void> {
+async function sendSessionPrompt(
+  storedSessionId: string,
+  text: string,
+  profile?: string,
+): Promise<void> {
   const gateway = new GatewayClient();
   try {
     await gateway.connect();
-    await gateway.request("prompt.submit", { session_id: sessionId, text });
+    const resumed = await gateway.request<{ session_id: string }>("session.resume", {
+      session_id: storedSessionId,
+      omit_messages: true,
+      defer_history: true,
+      ...(profile ? { profile } : {}),
+    });
+    await gateway.request("prompt.submit", {
+      session_id: resumed.session_id,
+      text,
+    });
   } finally {
     gateway.close();
   }
@@ -362,19 +375,34 @@ export default function MobileMirrorPage() {
       return resolvedSessionId;
     };
 
-    const syncDelta = async (resolvedSessionId: string) => {
+    const syncDelta = async (resolvedSessionId: string, afterId: number) => {
       const next = await api.getSessionMessagesSince(
         resolvedSessionId,
-        cursorRef.current,
+        afterId,
         profile || "",
       );
       if (cancelled || controller.signal.aborted || streamRunRef.current !== runId) return;
       const incoming = next.messages ?? [];
       if (incoming.length === 0) {
+        const revision = next.latest_message_id ?? next.revision ?? afterId;
+        if (revision > cursorRef.current) {
+          cursorRef.current = revision;
+        }
         return;
       }
-      setMessages((prev) => mergeSessionMessages(prev, incoming));
-      cursorRef.current = Math.max(cursorRef.current, latestMessageId(incoming));
+      setMessages((prev) => {
+        const merged = mergeSessionMessages(prev, incoming);
+        cursorRef.current = latestMessageId(merged);
+        return merged;
+      });
+    };
+
+    const catchUpFromEvent = async (event: SessionStreamEvent, resolvedSessionId: string) => {
+      const watermark = sessionStreamCursor(event, cursorRef.current);
+      if (watermark <= cursorRef.current) {
+        return;
+      }
+      await syncDelta(resolvedSessionId, cursorRef.current);
     };
 
     const runStream = async (resolvedSessionId: string) => {
@@ -400,19 +428,11 @@ export default function MobileMirrorPage() {
           for await (const event of readSessionEventStream(response.body)) {
             if (controller.signal.aborted || streamRunRef.current !== runId) return;
             if (event.type === "hello") {
-              const nextCursor = sessionStreamCursor(event, cursorRef.current);
-              if (nextCursor > cursorRef.current) {
-                await syncDelta(resolvedSessionId);
-                cursorRef.current = Math.max(cursorRef.current, nextCursor);
-              }
+              await catchUpFromEvent(event, resolvedSessionId);
               continue;
             }
             if (event.type === "message.appended") {
-              const nextCursor = sessionStreamCursor(event, cursorRef.current);
-              if (nextCursor > cursorRef.current) {
-                await syncDelta(resolvedSessionId);
-                cursorRef.current = Math.max(cursorRef.current, nextCursor);
-              }
+              await catchUpFromEvent(event, resolvedSessionId);
             }
           }
 
@@ -486,14 +506,14 @@ export default function MobileMirrorPage() {
     setSendBusy(true);
     try {
       setComposer("");
-      await sendSessionPrompt(selectedSessionId, text);
+      await sendSessionPrompt(selectedSessionId, text, profile || undefined);
     } catch (error) {
       setStreamNote(error instanceof Error ? error.message : String(error));
       setStreamStatus("error");
     } finally {
       setSendBusy(false);
     }
-  }, [composer, sendBusy, selectedSessionId]);
+  }, [composer, profile, sendBusy, selectedSessionId]);
 
   const sendDisabled = !composer.trim() || !selectedSessionId || sendBusy;
 
@@ -616,7 +636,10 @@ export default function MobileMirrorPage() {
               <div className="flex flex-col gap-3 pb-4">
                 {messages.map((message) => (
                   <MobileMessageBubble
-                    key={message.id ?? `${message.role}-${message.timestamp ?? Math.random()}`}
+                    key={
+                      message.id ??
+                      `${message.role}-${message.timestamp ?? ""}-${message.tool_call_id ?? ""}`
+                    }
                     message={message}
                   />
                 ))}

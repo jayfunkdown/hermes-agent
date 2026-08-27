@@ -58,4 +58,19 @@ describe("mobile-session-sync", () => {
     );
     expect(parseSessionStreamEvent("not json")).toBeNull();
   });
+
+  it("does not advance cursor before delta fetch would use the prior watermark", () => {
+    const priorCursor = 5;
+    const eventWatermark = sessionStreamCursor(
+      { type: "message.appended", latest_message_id: 12 },
+      priorCursor,
+    );
+    expect(eventWatermark).toBe(12);
+    // Delta fetch must use priorCursor (5), not eventWatermark (12), as after_id.
+    const delta = mergeSessionMessages(
+      [makeMessage(5, "assistant")],
+      [makeMessage(6), makeMessage(7)],
+    );
+    expect(latestMessageId(delta)).toBe(7);
+  });
 });

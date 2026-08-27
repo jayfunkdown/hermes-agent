@@ -1,5 +1,9 @@
-const CACHE_NAME = "hermes-mobile-shell-v1";
+const CACHE_NAME = "hermes-mobile-shell-v2";
 const PRECACHE_URLS = ["./mobile", "./manifest.webmanifest"];
+
+function shouldBypassCache(url) {
+  return /\/api(\/|$)/.test(url.pathname);
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -33,6 +37,7 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  if (shouldBypassCache(url)) return;
 
   if (request.mode === "navigate") {
     event.respondWith(
@@ -41,6 +46,17 @@ self.addEventListener("fetch", (event) => {
         return cached ?? caches.match("./manifest.webmanifest") ?? Response.error();
       }),
     );
+    return;
+  }
+
+  // Only cache static shell assets (manifest/icons). Never cache API, HTML, or JS
+  // bundles — those carry auth/session state or change every deploy.
+  const staticAsset =
+    url.pathname.endsWith(".webmanifest") ||
+    url.pathname.endsWith(".png") ||
+    url.pathname.endsWith(".ico");
+  if (!staticAsset) {
+    event.respondWith(fetch(request));
     return;
   }
 

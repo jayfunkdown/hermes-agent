@@ -2081,11 +2081,16 @@ export interface SessionMessage {
 export interface SessionMessagesResponse {
   session_id: string;
   messages: SessionMessage[];
+  revision?: number;
+  latest_message_id?: number;
+  unchanged?: boolean;
   pagination?: {
     limit: number;
-    offset: number;
+    offset?: number;
+    after_id?: number;
     order: "latest" | "oldest";
     returned: number;
+    has_more?: boolean;
   };
 }
 
