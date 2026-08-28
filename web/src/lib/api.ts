@@ -430,7 +430,14 @@ export const api = {
       profile,
     ),
   submitSessionMessage: (id: string, text: string, profile = getManagementProfile()) =>
-    fetchJSON<{ ok: boolean; accepted: boolean; session_id: string }>(
+    fetchJSON<{
+      accepted: boolean;
+      latest_message_id?: number;
+      message?: SessionMessage;
+      ok: boolean;
+      revision?: number;
+      session_id: string;
+    }>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/messages`, profile),
       {
         method: "POST",

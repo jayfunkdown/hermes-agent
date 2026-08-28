@@ -44,6 +44,14 @@ import {
   shouldShowChatLoadFailure,
   shouldShowChatLoadingSpinner,
 } from "@/lib/mobile-mirror-chat-state";
+import {
+  createOptimisticUserMessage,
+  hasVisibleUserMessage,
+  isOptimisticUserMessage,
+  reconcileSubmittedUserMessage,
+  resolveSubmitTargetSessionId,
+  type ApplyMessageDeltaOptions,
+} from "@/lib/mobile-session-submit";
 import { GatewayClient } from "@/lib/gatewayClient";
 import {
   latestMessageId,
@@ -235,6 +243,11 @@ export default function MobileMirrorPage() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const prevLastMessageIdRef = useRef<number | null>(null);
+  const messagesRef = useRef(messages);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const rosterForDelivery = allBots.length > 0 ? allBots : bots;
 
@@ -352,28 +365,34 @@ export default function MobileMirrorPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activities, inChat, loadingEarlier, messages, messagesLoading, showThinking]);
 
-  const applyMessageDelta = useCallback(async (sessionId: string, afterId: number, profileName: string) => {
+  const applyMessageDelta = useCallback(async (
+    sessionId: string,
+    afterId: number,
+    profileName: string,
+    options?: ApplyMessageDeltaOptions,
+  ): Promise<boolean> => {
     const next = await api.getSessionMessagesSince(
       sessionId,
       afterId,
       profileName,
-      cursorRef.current || undefined,
+      options?.force ? undefined : (cursorRef.current || undefined),
     );
     if (next.unchanged) {
       const revision = next.latest_message_id ?? next.revision ?? cursorRef.current;
       if (revision > cursorRef.current) cursorRef.current = revision;
-      return;
+      return false;
     }
     const incoming = next.messages ?? [];
     if (incoming.length === 0) {
       const revision = next.latest_message_id ?? next.revision ?? afterId;
       if (revision > cursorRef.current) cursorRef.current = revision;
-      return;
+      return false;
     }
     let mergedMessages: SessionMessage[] | null = null;
     setMessages((prev) => {
       mergedMessages = mergeSessionMessages(prev, incoming);
       cursorRef.current = latestMessageId(mergedMessages);
+      messagesRef.current = mergedMessages;
       if (incoming.some((message) => message.role === "assistant")) {
         setAwaitingReply(false);
       }
@@ -382,6 +401,7 @@ export default function MobileMirrorPage() {
     if (mergedMessages) {
       bumpBotFromMessages(profileName.trim() || "default", mergedMessages);
     }
+    return true;
   }, [bumpBotFromMessages]);
 
   useEffect(() => {
@@ -627,16 +647,49 @@ export default function MobileMirrorPage() {
     if (!text || !selectedSessionId || sendBusy || chatLoadFailed) return;
     setSendBusy(true);
     setAwaitingReply(true);
+    const afterSubmitCursor = cursorRef.current;
     try {
       setComposer("");
+      setMessages((prev) => {
+        const merged = mergeSessionMessages(prev, [createOptimisticUserMessage(text)]);
+        messagesRef.current = merged;
+        return merged;
+      });
+
       const result = await api.submitSessionMessage(selectedSessionId, text, scopedProfile || "");
-      const targetSessionId = result.session_id || resolvedSessionIdRef.current || selectedSessionId;
-      if (targetSessionId !== selectedSessionRef.current) {
-        setAwaitingReply(false);
-        return;
+      const targetSessionId = resolveSubmitTargetSessionId(
+        result.session_id,
+        resolvedSessionIdRef.current,
+        selectedSessionId,
+      );
+
+      setMessages((prev) => {
+        const merged = reconcileSubmittedUserMessage(prev, text, result.message);
+        cursorRef.current = Math.max(
+          cursorRef.current,
+          result.latest_message_id ?? latestMessageId(merged),
+        );
+        messagesRef.current = merged;
+        return merged;
+      });
+
+      await applyMessageDelta(targetSessionId, afterSubmitCursor, scopedProfile || "", { force: true });
+
+      if (!hasVisibleUserMessage(messagesRef.current, text)) {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          await sleep(attempt === 0 ? 100 : 200);
+          await applyMessageDelta(targetSessionId, cursorRef.current, scopedProfile || "", { force: true });
+          if (hasVisibleUserMessage(messagesRef.current, text)) break;
+        }
       }
-      await applyMessageDelta(targetSessionId, cursorRef.current, scopedProfile || "");
-      if (targetSessionId !== selectedSessionId) {
+
+      if (!hasVisibleUserMessage(messagesRef.current, text)) {
+        setAwaitingReply(false);
+        setStreamNote("Message accepted, but the transcript did not update. Pull to refresh or retry.");
+        setStreamStatus("error");
+      }
+
+      if (targetSessionId !== selectedSessionRef.current) {
         resolvedSessionIdRef.current = targetSessionId;
         setSelectedSessionId(targetSessionId);
         setSearchParams((prev) => {
@@ -645,8 +698,14 @@ export default function MobileMirrorPage() {
           return next;
         }, { replace: true });
       }
+
       void refreshBots();
     } catch (error) {
+      setMessages((prev) => {
+        const merged = prev.filter((message) => !isOptimisticUserMessage(message, text));
+        messagesRef.current = merged;
+        return merged;
+      });
       setAwaitingReply(false);
       setStreamNote(formatMobileError(error));
       setStreamStatus("error");

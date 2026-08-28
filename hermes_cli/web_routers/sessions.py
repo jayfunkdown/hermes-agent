@@ -41,6 +41,8 @@ manage_router = APIRouter()
 
 _MOBILE_SEND_WINDOW_S = 60.0
 _MOBILE_SEND_MAX = 20
+_MOBILE_SUBMIT_ROW_POLL_INTERVAL_S = 0.05
+_MOBILE_SUBMIT_ROW_POLL_TIMEOUT_S = 3.0
 _mobile_send_history: dict[str, list[float]] = {}
 _mobile_send_lock = threading.Lock()
 
@@ -70,6 +72,109 @@ def _mobile_gateway_error(response: dict | None) -> str | None:
     if isinstance(error, dict):
         return str(error.get("message") or "gateway request failed")
     return None
+
+
+def _project_messages_for_api(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from agent.compaction_display import project_compaction_message_for_display
+    from agent.context_compressor import is_compaction_summary_message
+
+    projected_messages = []
+    for message in messages:
+        if not is_compaction_summary_message(message):
+            projected_messages.append(message)
+            continue
+        display_view = project_compaction_message_for_display(message)
+        projected = message.copy()
+        if display_view is None:
+            if not projected.get("display_kind"):
+                projected["display_kind"] = "hidden"
+        else:
+            projected["display_content"] = display_view.get("content")
+            projected.pop("display_kind", None)
+        projected_messages.append(projected)
+    return projected_messages
+
+
+def _normalize_message_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    return str(content).strip()
+
+
+def _resolve_live_session_id(profile: Optional[str], session_id: str) -> Optional[str]:
+    db = _open_session_db_for_profile(profile, read_only=True)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            return None
+        return db.resolve_resume_session_id(sid)
+    finally:
+        db.close()
+
+
+def _read_session_message_revision(profile: Optional[str], session_id: str) -> tuple[Optional[str], int]:
+    db = _open_session_db_for_profile(profile, read_only=True)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            return None, 0
+        sid = db.resolve_resume_session_id(sid)
+        return sid, db.session_message_revision(sid)
+    finally:
+        db.close()
+
+
+def _read_submitted_user_message(
+    profile: Optional[str],
+    session_id: str,
+    after_id: int,
+    text: str,
+) -> tuple[Optional[str], int, Optional[Dict[str, Any]]]:
+    db = _open_session_db_for_profile(profile, read_only=True)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            return None, 0, None
+        sid = db.resolve_resume_session_id(sid)
+        revision = db.session_message_revision(sid)
+        messages = db.get_messages(sid, after_id=after_id, limit=50)
+        expected = text.strip()
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = _normalize_message_content(
+                message.get("content") or message.get("text")
+            )
+            if content == expected:
+                return sid, revision, message
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                return sid, revision, message
+        return sid, revision, None
+    finally:
+        db.close()
+
+
+async def _poll_submitted_user_message(
+    profile: Optional[str],
+    session_id: str,
+    after_id: int,
+    text: str,
+) -> tuple[Optional[str], int, Optional[Dict[str, Any]]]:
+    deadline = time.monotonic() + _MOBILE_SUBMIT_ROW_POLL_TIMEOUT_S
+    latest: tuple[Optional[str], int, Optional[Dict[str, Any]]] = (None, 0, None)
+    while True:
+        latest = await asyncio.to_thread(
+            _read_submitted_user_message, profile, session_id, after_id, text
+        )
+        if latest[2] is not None:
+            return latest
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(_MOBILE_SUBMIT_ROW_POLL_INTERVAL_S)
+    return latest
 
 # Late-bound web_server helpers (resolved at call time; cycle-safe,
 # monkeypatch-transparent).
@@ -681,6 +786,10 @@ async def submit_session_message(
     if not live_session_id:
         raise HTTPException(status_code=404, detail="session not found")
 
+    _, revision_before = await asyncio.to_thread(
+        _read_session_message_revision, profile, session_id
+    )
+
     submit_response = await asyncio.to_thread(
         _mobile_gateway_request,
         "prompt.submit",
@@ -689,7 +798,45 @@ async def submit_session_message(
     submit_error = _mobile_gateway_error(submit_response)
     if submit_error:
         raise HTTPException(status_code=409, detail=submit_error)
-    return {"ok": True, "session_id": live_session_id, "accepted": True}
+
+    resolved_sid, revision, raw_message = await _poll_submitted_user_message(
+        profile,
+        session_id,
+        revision_before,
+        text,
+    )
+
+    body: Dict[str, Any] = {
+        "ok": True,
+        "session_id": resolved_sid or live_session_id,
+        "accepted": True,
+        "revision": revision,
+        "latest_message_id": revision,
+    }
+
+    if raw_message is not None:
+        projected = _project_messages_for_api([raw_message])
+        if projected:
+            body["message"] = projected[0]
+
+    try:
+        from hermes_cli.session_event_hub import get_session_event_hub
+
+        hub = get_session_event_hub()
+        if hub is not None and resolved_sid and revision:
+            message_ids = None
+            if raw_message is not None and isinstance(raw_message.get("id"), int):
+                message_ids = [raw_message["id"]]
+            await hub.notify_session_revision(
+                profile,
+                resolved_sid,
+                revision,
+                message_ids=message_ids,
+            )
+    except Exception:
+        _log.debug("session event hub notify after mobile submit failed", exc_info=True)
+
+    return body
 
 
 @manage_router.get("/api/sessions/{session_id}/messages")
@@ -761,26 +908,7 @@ async def get_session_messages(
     if result is None:
         raise HTTPException(status_code=404, detail="Session not found")
     sid, revision, _limit, messages, page_anchor, has_more, page_mode = result
-    from agent.compaction_display import project_compaction_message_for_display
-    from agent.context_compressor import is_compaction_summary_message
-
-    projected_messages = []
-    for message in messages:
-        if not is_compaction_summary_message(message):
-            projected_messages.append(message)
-            continue
-        display_view = project_compaction_message_for_display(message)
-        projected = message.copy()
-        if display_view is None:
-            if not projected.get("display_kind"):
-                projected["display_kind"] = "hidden"
-        else:
-            # Keep the physical content for inspection/export compatibility;
-            # Desktop consumes this display-only projection. A legacy hidden
-            # wrapper must not hide a successfully recovered live ask.
-            projected["display_content"] = display_view.get("content")
-            projected.pop("display_kind", None)
-        projected_messages.append(projected)
+    projected_messages = _project_messages_for_api(messages)
 
     pagination: Dict[str, Any] = {
         "limit": _limit,

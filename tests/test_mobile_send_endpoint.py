@@ -43,9 +43,29 @@ async def test_mobile_send_resumes_before_prompt(monkeypatch):
             return {"result": {"status": "streaming"}}
         return None
 
+    async def fake_poll(profile, session_id, after_id, text):
+        return "runtime-s1", 9, {
+            "id": 9,
+            "role": "user",
+            "content": text,
+        }
+
     monkeypatch.setattr(sessions, "_mobile_gateway_request", fake_gateway)
+    monkeypatch.setattr(sessions, "_poll_submitted_user_message", fake_poll)
+    monkeypatch.setattr(
+        sessions,
+        "_read_session_message_revision",
+        lambda profile, session_id: ("runtime-s1", 8),
+    )
     result = await sessions.submit_session_message("stored-s1", request_with_json({"text": "hello"}))
-    assert result == {"ok": True, "session_id": "runtime-s1", "accepted": True}
+    assert result == {
+        "ok": True,
+        "session_id": "runtime-s1",
+        "accepted": True,
+        "revision": 9,
+        "latest_message_id": 9,
+        "message": {"id": 9, "role": "user", "content": "hello"},
+    }
     assert calls == [
         (
             "session.resume",
@@ -69,7 +89,16 @@ async def test_mobile_send_passes_profile_to_resume(monkeypatch):
             return {"result": {"session_id": "runtime-s1"}}
         return {"result": {"status": "streaming"}}
 
+    async def fake_poll(profile, session_id, after_id, text):
+        return "runtime-s1", 2, {"id": 2, "role": "user", "content": text}
+
     monkeypatch.setattr(sessions, "_mobile_gateway_request", fake_gateway)
+    monkeypatch.setattr(sessions, "_poll_submitted_user_message", fake_poll)
+    monkeypatch.setattr(
+        sessions,
+        "_read_session_message_revision",
+        lambda profile, session_id: ("runtime-s1", 1),
+    )
     await sessions.submit_session_message(
         "stored-s1",
         request_with_json({"text": "hello"}, profile="boss-bot"),
