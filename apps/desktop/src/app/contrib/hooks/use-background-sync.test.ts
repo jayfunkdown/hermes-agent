@@ -73,23 +73,29 @@ function makeRefresh(resolveSession: ActiveTranscriptRefreshDeps['resolveSession
 
 function useSyncHarness({
   activeIsMessaging = false,
+  activeNeedsMirrorReconcile = false,
   activeSessionId,
   activeStoredSessionId,
+  refreshActiveMirrorDelta = vi.fn(async () => undefined),
   refreshActiveTranscript
 }: {
   activeIsMessaging?: boolean
+  activeNeedsMirrorReconcile?: boolean
   activeSessionId: string | null
   activeStoredSessionId: string | null
+  refreshActiveMirrorDelta?: () => Promise<void>
   refreshActiveTranscript: () => Promise<void>
 }) {
   useBackgroundSync({
     activeConnectionId: 'local',
     activeGatewayProfile: 'default',
     activeIsMessaging,
+    activeNeedsMirrorReconcile,
     activeSessionId,
     activeStoredSessionId,
     freshDraftReady: false,
     gatewayState: 'open',
+    refreshActiveMirrorDelta,
     refreshActiveTranscript,
     refreshCronJobs: vi.fn(),
     refreshCurrentModel: vi.fn(),
@@ -102,7 +108,13 @@ function useSyncHarness({
 
 function renderSync(
   refreshActiveTranscript: () => Promise<void>,
-  options: { activeIsMessaging?: boolean; activeSessionId?: null | string; activeStoredSessionId?: null | string } = {}
+  options: {
+    activeIsMessaging?: boolean
+    activeNeedsMirrorReconcile?: boolean
+    activeSessionId?: null | string
+    activeStoredSessionId?: null | string
+    refreshActiveMirrorDelta?: () => Promise<void>
+  } = {}
 ) {
   return renderHook(() =>
     useSyncHarness({
@@ -172,6 +184,24 @@ describe('active transcript refresh', () => {
       await Promise.resolve()
     })
 
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('polls remote-owned mirror chats on a 2s cadence', async () => {
+    vi.useFakeTimers()
+    const refresh = vi.fn(async () => undefined)
+    const mirror = vi.fn(async () => undefined)
+
+    renderSync(refresh, { activeNeedsMirrorReconcile: true, refreshActiveMirrorDelta: mirror })
+    expect(mirror).toHaveBeenCalledTimes(1)
+    mirror.mockClear()
+
+    await act(async () => {
+      vi.advanceTimersByTime(2_000)
+      await Promise.resolve()
+    })
+
+    expect(mirror).toHaveBeenCalledTimes(1)
     expect(refresh).not.toHaveBeenCalled()
   })
 

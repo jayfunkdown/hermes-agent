@@ -14,6 +14,7 @@ import { type CSSProperties, lazy, type ReactNode, Suspense, useCallback, useEff
 import { useLocation, useNavigate } from 'react-router'
 
 import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
+import { reconcileActiveMirrorDelta, resolveMirrorOwnerRoute } from '@/lib/session-mirror-reconcile'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
 import { ConfirmHost } from '@/components/confirm-host'
@@ -183,6 +184,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const cronReviewSeenRef = useRef(0)
   const activeTranscriptSignatureRef = useRef(new Map<string, string>())
   const activeTranscriptRequestSequenceRef = useRef(0)
+  const activeMirrorRequestSequenceRef = useRef(0)
   // Stable identity for the whole callback surface (see WiringActions). Mutated
   // in place each render so memoized surfaces never re-render on churn.
   const actionsRef = useRef<WiringActions | null>(null)
@@ -437,6 +439,18 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         updateSessionState
       }),
     [activeSessionIdRef, busyRef, selectedStoredSessionIdRef, updateSessionState]
+  )
+
+  const refreshActiveMirrorDelta = useCallback(
+    () =>
+      reconcileActiveMirrorDelta({
+        activeSessionIdRef,
+        readSessionState: runtimeSessionId => sessionStateByRuntimeIdRef.current.get(runtimeSessionId),
+        requestSequenceRef: activeMirrorRequestSequenceRef,
+        selectedStoredSessionIdRef,
+        updateSessionState
+      }),
+    [activeSessionIdRef, selectedStoredSessionIdRef, sessionStateByRuntimeIdRef, updateSessionState]
   )
 
   const { handleGatewayEvent } = useMessageStream({
@@ -829,6 +843,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     !!selectedStoredSessionId &&
     isMessagingSource(messagingSessions.find(s => sessionMatchesStoredId(s, selectedStoredSessionId))?.source)
 
+  const activeNeedsMirrorReconcile = Boolean(
+    selectedStoredSessionId && activeSessionId && resolveMirrorOwnerRoute(selectedStoredSessionId)
+  )
+
   // sessions.changed refreshes every open transcript; only messaging retains
   // the periodic safety-net it already had before this fix.
   // Keep app data live while the gateway is open (on-connect reseed + the
@@ -837,10 +855,12 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     activeConnectionId,
     activeGatewayProfile,
     activeIsMessaging,
+    activeNeedsMirrorReconcile,
     activeSessionId,
     activeStoredSessionId: selectedStoredSessionId,
     freshDraftReady,
     gatewayState,
+    refreshActiveMirrorDelta,
     refreshActiveTranscript,
     refreshCronJobs,
     refreshCurrentModel,

@@ -613,7 +613,12 @@ export interface SessionMessagesResponse {
     offset: number
     order: 'latest' | 'oldest'
     returned: number
+    after_id?: number
+    has_more?: boolean
   }
+  revision?: number
+  latest_message_id?: number
+  unchanged?: boolean
   session_id: string
 }
 

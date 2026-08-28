@@ -394,6 +394,30 @@ export function getSessionMessages(
  */
 export const LATEST_SESSION_MESSAGES_LIMIT = 120
 
+export function getSessionMessagesSince(
+  id: string,
+  afterId: number,
+  profile?: ProfileScope,
+  ifRevision?: number
+): Promise<SessionMessagesResponse> {
+  const query = new URLSearchParams({ after_id: String(afterId) })
+
+  if (ifRevision !== undefined) {
+    query.set('if_revision', String(ifRevision))
+  }
+
+  const scope = capabilityScoped(profile)
+
+  if (scope.profile) {
+    query.set('profile', scope.profile)
+  }
+
+  return hermesApi<SessionMessagesResponse>({
+    ...scope,
+    path: `/api/sessions/${encodeURIComponent(id)}/messages?${query.toString()}`
+  })
+}
+
 export function getLatestSessionMessages(id: string, profile?: ProfileScope): Promise<SessionMessagesResponse> {
   // includeCompacted: durable display history must include rows preserved by
   // in-place compaction (active=0, compacted=1); without them the transcript

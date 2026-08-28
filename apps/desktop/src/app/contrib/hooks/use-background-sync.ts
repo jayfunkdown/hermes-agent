@@ -4,6 +4,7 @@ import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { getLatestSessionMessages } from '@/hermes'
 import { preserveLocalAssistantErrors, sealOpenToolParts, toChatMessages } from '@/lib/chat-messages'
+import { ACTIVE_MIRROR_SESSION_POLL_INTERVAL_MS } from '@/lib/session-mirror-reconcile'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
@@ -287,10 +288,12 @@ interface BackgroundSyncParams {
   activeConnectionId: null | string
   activeGatewayProfile: string
   activeIsMessaging: boolean
+  activeNeedsMirrorReconcile: boolean
   activeSessionId: null | string
   activeStoredSessionId: null | string
   freshDraftReady: boolean
   gatewayState: string
+  refreshActiveMirrorDelta: () => Promise<unknown> | unknown
   refreshActiveTranscript: () => Promise<unknown> | unknown
   refreshCronJobs: () => Promise<unknown> | unknown
   refreshCurrentModel: (force?: boolean) => Promise<unknown> | unknown
@@ -355,10 +358,12 @@ export function useBackgroundSync({
   activeConnectionId,
   activeGatewayProfile,
   activeIsMessaging,
+  activeNeedsMirrorReconcile,
   activeSessionId,
   activeStoredSessionId,
   freshDraftReady,
   gatewayState,
+  refreshActiveMirrorDelta,
   refreshActiveTranscript,
   refreshCronJobs,
   refreshCurrentModel,
@@ -594,6 +599,29 @@ export function useBackgroundSync({
     changeEventsAvailable,
     gatewayState,
     requestActiveTranscriptRefresh
+  ])
+
+  // Remote-owned Bot Chats (Point Man on OVH while local stays primary) do not
+  // receive mobile REST submits over the ambient websocket. Keyset-poll the
+  // owning backend for rows with id > lastSeen while the chat is on screen.
+  useEffect(() => {
+    if (gatewayState !== 'open' || !activeNeedsMirrorReconcile || !activeSessionId || !activeStoredSessionId) {
+      return
+    }
+
+    const run = () => {
+      void refreshActiveMirrorDelta()
+    }
+
+    run()
+
+    return visiblePoll(ACTIVE_MIRROR_SESSION_POLL_INTERVAL_MS, run)
+  }, [
+    activeNeedsMirrorReconcile,
+    activeSessionId,
+    activeStoredSessionId,
+    gatewayState,
+    refreshActiveMirrorDelta
   ])
 
   // Messaging session lists against an older backend: no sessions.changed, so
