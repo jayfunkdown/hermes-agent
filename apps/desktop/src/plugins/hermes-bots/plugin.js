@@ -4785,6 +4785,159 @@ function cachedUnionRoster() {
   return null
 }
 
+/** Point Man (`boss-bot`) canonical chat lives on the registered remote
+ *  gateway when one is connected — even when this Desktop window's active
+ *  gateway remains local (#desktop-botchat-remote-routing). */
+const REMOTE_CANONICAL_PROFILE = 'boss-bot'
+
+function unionRegistrySources(union) {
+  return Array.isArray(union?.sources) ? union.sources : []
+}
+
+function hasConnectedRemoteGateway(union) {
+  const sources = unionRegistrySources(union)
+
+  if (sources.some(source => source?.kind && source.kind !== 'local' && source?.error !== 'connect-on-demand')) {
+    return true
+  }
+
+  const activeId = String(host.activeConnectionId?.() || host.state.connectionId?.get?.() || '').trim()
+
+  return Boolean(activeId && activeId !== 'local')
+}
+
+function findRemoteAgentForProfile(agents, profileName) {
+  const name = String(profileName || '').trim()
+
+  return (Array.isArray(agents) ? agents : []).find(agent => {
+    const profile = String(agent?.profile || '').trim()
+    const ownerId = String(agent?.connectionId || '').trim()
+
+    return profile === name && ownerId && agent?.connectionKind !== 'local'
+  }) || null
+}
+
+function agentRouteDescriptor(agent) {
+  const profile = String(agent?.profile || '').trim()
+  const connectionId = String(agent?.connectionId || '').trim()
+
+  return {
+    connectionId,
+    mode: agent?.connectionKind === 'local' ? 'local' : 'remote',
+    profile,
+    targetProfile: agent?.targetProfile || profile
+  }
+}
+
+function resolveRemoteCanonicalElevation(union, profileName) {
+  const name = String(profileName || '').trim()
+
+  if (name !== REMOTE_CANONICAL_PROFILE || !hasConnectedRemoteGateway(union)) {
+    return null
+  }
+
+  const agents = Array.isArray(union?.agents) ? union.agents : []
+  const remoteAgent = findRemoteAgentForProfile(agents, name)
+
+  if (remoteAgent) {
+    return { agent: remoteAgent, route: agentRouteDescriptor(remoteAgent) }
+  }
+
+  const remoteSource = unionRegistrySources(union).find(source => source?.kind && source.kind !== 'local')
+
+  if (!remoteSource?.connectionId) {
+    return null
+  }
+
+  return {
+    agent: null,
+    route: {
+      connectionId: String(remoteSource.connectionId).trim(),
+      mode: 'remote',
+      profile: name,
+      targetProfile: name
+    }
+  }
+}
+
+function annotateAgentOntoRow(row, agent) {
+  const profile = String(agent?.profile || '').trim()
+  const connectionId = String(agent?.connectionId || '').trim()
+
+  row.handle = agent.handle
+  row.connectionId = connectionId
+  row.connectionKind = agent.connectionKind
+  row.connectionLabel = agent.connectionLabel
+  row.targetProfile = agent.targetProfile || profile
+  row.route = agentRouteDescriptor(agent)
+  row.sourceScoped = true
+  delete row.remoteSource
+}
+
+function remoteCanonicalRowIsElevated(row, elevation) {
+  return Boolean(
+    row?.sourceScoped &&
+      row?.route?.connectionId &&
+      elevation?.route &&
+      row.route.connectionId === elevation.route.connectionId &&
+      row.route.mode === 'remote'
+  )
+}
+
+function elevateRemoteCanonicalBot(bot, context = {}) {
+  const name = String(bot?.name || '').trim()
+
+  if (name !== REMOTE_CANONICAL_PROFILE) {
+    return bot
+  }
+
+  const union = {
+    sources: context.sources,
+    agents: context.agents
+  }
+
+  if (!hasConnectedRemoteGateway(union)) {
+    return bot
+  }
+
+  let elevation = resolveRemoteCanonicalElevation(union, name)
+
+  if (!elevation && Array.isArray(context.roster)) {
+    const peer = context.roster.find(
+      row =>
+        String(row?.name || '').trim() === name &&
+        row?.remoteSource &&
+        row?.route?.connectionId &&
+        row.route.connectionId !== 'local'
+    )
+
+    if (peer?.route) {
+      elevation = { agent: peer, route: peer.route }
+    }
+  }
+
+  if (!elevation?.route) {
+    return bot
+  }
+
+  if (remoteCanonicalRowIsElevated(bot, elevation)) {
+    return bot
+  }
+
+  const { route, agent } = elevation
+
+  return {
+    ...bot,
+    connectionId: route.connectionId,
+    connectionKind: agent?.connectionKind || 'remote',
+    connectionLabel: agent?.connectionLabel || bot.connectionLabel,
+    targetProfile: route.targetProfile,
+    route,
+    sourceScoped: true,
+    remoteSource: undefined
+  }
+}
+
 /** Merge the union agent roster (host.agents) over the active gateway's
  *  profiles.list. Active-source rows — matched by the LIVE connection id,
  *  falling back to the roster's primaryConnectionId, then the legacy
@@ -4875,29 +5028,26 @@ function mergeMultiSourceRoster(local, union, activeConnectionId, previous = [])
     // twice. Older Electron builds predate the connection ids; fall back to
     // the legacy local-source rule so single-source behavior stays intact.
     const isActiveSource = activeId ? connectionId === activeId : agent.connectionKind === 'local'
+    const remoteElevation = isActiveSource ? resolveRemoteCanonicalElevation(union, profile) : null
+    const routingAgent = remoteElevation?.agent || agent
     const row = isActiveSource ? activeByName.get(profile) : null
 
     if (row) {
       // Annotate in place: the @name-device handle only differs from the
       // bare name when the profile exists on several sources.
-      row.handle = agent.handle
-      row.connectionId = agent.connectionId
-      row.connectionKind = agent.connectionKind
-      row.connectionLabel = agent.connectionLabel
-      row.targetProfile = agent.targetProfile || profile
-      row.route = {
-        connectionId,
-        mode: agent.connectionKind === 'local' ? 'local' : 'remote',
-        profile,
-        targetProfile: agent.targetProfile || profile
-      }
-      row.sourceScoped = true
+      annotateAgentOntoRow(row, routingAgent)
       continue
     }
 
     if (isActiveSource) {
       // Union saw an active-source profile profiles.list didn't return (older
       // backend mid-refresh) — skip rather than invent a thin row.
+      continue
+    }
+
+    const elevatedPrimary = activeByName.get(profile)
+
+    if (remoteCanonicalRowIsElevated(elevatedPrimary, resolveRemoteCanonicalElevation(union, profile))) {
       continue
     }
 
@@ -5964,16 +6114,22 @@ async function ensureBotMetadata(bot) {
  *  resolves a canonical-chat id. */
 async function openRosterBot(bot) {
   const generation = ++botOpenGeneration
-  const key = botRosterKey(bot)
-  const meta = botRosterMeta(bot, $botMeta.get())
+  const rosterSnapshot = cachedUnionRoster()
+  const owner = elevateRemoteCanonicalBot(bot, {
+    sources: rosterSnapshot?.sources,
+    agents: rosterSnapshot?.agents,
+    roster: rosterSnapshot?.profiles || $lastRoster.get()
+  })
+  const key = botRosterKey(owner)
+  const meta = botRosterMeta(owner, $botMeta.get())
   // Keep the currently visible group as a fallback until this explicit action
   // has actually fronted a new owner; a failed home open must not steal the
   // center from a group the user was reading.
   const previousGroup = $groupChatWorkspace.get()
 
   haptic('tap')
-  saveSelectedRosterBot(bot)
-  setBotsWorkspaceOwner(botWorkspaceOwnerKey(bot), bot)
+  saveSelectedRosterBot(owner)
+  setBotsWorkspaceOwner(botWorkspaceOwnerKey(owner), owner)
 
   $groupChatWorkspace.set(null)
 
@@ -5986,7 +6142,7 @@ async function openRosterBot(bot) {
   try {
     // Activation selects this row's source only. Canonical identity is resolved
     // after that by the owner profile's "Bot Chat" title registry.
-    await prepareBotSource(bot)
+    await prepareBotSource(owner)
   } catch (error) {
     if (generation === botOpenGeneration) {
       $openBotChat.set(null)
@@ -5995,7 +6151,7 @@ async function openRosterBot(bot) {
       }
       syncBotsHomeWorkspace()
 
-      notifyBotOpenFailure(error, bot, `Could not reach ${bot.connectionLabel || 'the gateway'}`)
+      notifyBotOpenFailure(error, owner, `Could not reach ${owner.connectionLabel || 'the gateway'}`)
     }
 
     return false
@@ -6006,7 +6162,7 @@ async function openRosterBot(bot) {
   }
 
   try {
-    const opened = await openBotCanonicalChat(bot)
+    const opened = await openBotCanonicalChat(owner)
 
     if (generation !== botOpenGeneration) {
       return false
@@ -6037,7 +6193,7 @@ async function openRosterBot(bot) {
       }
       syncBotsHomeWorkspace()
 
-      notifyBotOpenFailure(error, bot, `Could not open ${displayName(bot, meta)}'s chat — try again`)
+      notifyBotOpenFailure(error, owner, `Could not open ${displayName(owner, meta)}'s chat — try again`)
     }
 
     return false
@@ -6056,7 +6212,7 @@ async function openRosterBot(bot) {
 
   $openBotChat.set({ key, openedRegistryId: '' })
   closeBotsHomeWorkspace()
-  newBotChat(bot)
+  newBotChat(owner)
   return true
 }
 

@@ -32,7 +32,7 @@ function runtime() {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__mergeMultiSourceRoster = mergeMultiSourceRoster;\nglobalThis.__botHandle = botHandle;\nglobalThis.__botRosterKey = botRosterKey;\nglobalThis.__botRosterMeta = botRosterMeta;\nglobalThis.__displayName = displayName;\nglobalThis.__filterBots = filterBots;\nglobalThis.__resolveRosterMentions = resolveRosterMentions;\nglobalThis.__botConnectionRoute = botConnectionRoute;\nglobalThis.__resolveBotConnectionRoute = resolveBotConnectionRoute;'
+      '\nglobalThis.__mergeMultiSourceRoster = mergeMultiSourceRoster;\nglobalThis.__botHandle = botHandle;\nglobalThis.__botRosterKey = botRosterKey;\nglobalThis.__botRosterMeta = botRosterMeta;\nglobalThis.__displayName = displayName;\nglobalThis.__filterBots = filterBots;\nglobalThis.__resolveRosterMentions = resolveRosterMentions;\nglobalThis.__botConnectionRoute = botConnectionRoute;\nglobalThis.__resolveBotConnectionRoute = resolveBotConnectionRoute;\nglobalThis.__elevateRemoteCanonicalBot = elevateRemoteCanonicalBot;\nglobalThis.__resolveRemoteCanonicalElevation = resolveRemoteCanonicalElevation;\nglobalThis.__hasConnectedRemoteGateway = hasConnectedRemoteGateway;'
     )
   vm.runInNewContext(code, context)
   return context
@@ -115,6 +115,116 @@ test('merge: union-only active profiles are NOT invented as thin rows', () => {
   const out = merge(local, union, 'local')
   assert.equal(out.profiles.length, 1)
   assert.equal(out.profiles[0].name, 'default')
+})
+
+test('merge: local-primary Point Man row elevates to the remote gateway route', () => {
+  const { __mergeMultiSourceRoster: merge, __botConnectionRoute: route } = runtime()
+  const local = { profiles: [{ name: 'boss-bot', display_name: 'Point Man', last_session: { id: '20260823_022120_72b9ab' } }] }
+  const union = {
+    primaryConnectionId: 'local',
+    sources: [
+      { connectionId: 'local', kind: 'local', label: 'This device' },
+      { connectionId: 'ovh', kind: 'remote', label: 'OVH' }
+    ],
+    agents: [
+      {
+        connectionId: 'local',
+        connectionKind: 'local',
+        connectionLabel: 'This device',
+        profile: 'boss-bot',
+        handle: 'boss-bot-this-device'
+      },
+      {
+        connectionId: 'ovh',
+        connectionKind: 'remote',
+        connectionLabel: 'OVH',
+        profile: 'boss-bot',
+        handle: 'boss-bot-ovh'
+      },
+      {
+        connectionId: 'local',
+        connectionKind: 'local',
+        connectionLabel: 'This device',
+        profile: 'default',
+        handle: 'default-this-device'
+      }
+    ]
+  }
+
+  const out = merge(local, union, 'local')
+  const pointMan = out.profiles.find(row => row.name === 'boss-bot' && !row.remoteSource)
+
+  assert.equal(pointMan.last_session.id, '20260823_022120_72b9ab')
+  assert.equal(pointMan.connectionId, 'ovh')
+  assert.equal(pointMan.sourceScoped, true)
+  assert.equal(pointMan.remoteSource, undefined)
+  assert.deepEqual(JSON.parse(JSON.stringify(route(pointMan))), {
+    connectionId: 'ovh',
+    mode: 'remote',
+    profile: 'boss-bot',
+    targetProfile: 'boss-bot'
+  })
+  assert.equal(out.profiles.filter(row => row.name === 'boss-bot').length, 1)
+})
+
+test('merge: local-only boss-bot keeps the local route when no remote gateway is registered', () => {
+  const { __mergeMultiSourceRoster: merge, __botConnectionRoute: route } = runtime()
+  const local = { profiles: [{ name: 'boss-bot', display_name: 'Point Man' }] }
+  const union = {
+    primaryConnectionId: 'local',
+    sources: [{ connectionId: 'local', kind: 'local', label: 'This device' }],
+    agents: [
+      {
+        connectionId: 'local',
+        connectionKind: 'local',
+        connectionLabel: 'This device',
+        profile: 'boss-bot',
+        handle: 'boss-bot-this-device'
+      }
+    ]
+  }
+
+  const out = merge(local, union, 'local')
+  const pointMan = out.profiles.find(row => row.name === 'boss-bot')
+
+  assert.equal(pointMan.connectionId, 'local')
+  assert.deepEqual(JSON.parse(JSON.stringify(route(pointMan))), {
+    connectionId: 'local',
+    mode: 'local',
+    profile: 'boss-bot',
+    targetProfile: 'boss-bot'
+  })
+})
+
+test('elevateRemoteCanonicalBot: copies a remote roster peer when the clicked row is still local-scoped', () => {
+  const { __elevateRemoteCanonicalBot: elevate, __botConnectionRoute: route } = runtime()
+  const localRow = { name: 'boss-bot', connectionId: 'local', sourceScoped: true, route: { connectionId: 'local', mode: 'local', profile: 'boss-bot', targetProfile: 'boss-bot' } }
+  const roster = [
+    localRow,
+    {
+      name: 'boss-bot',
+      remoteSource: true,
+      sourceScoped: true,
+      connectionId: 'ovh',
+      route: { connectionId: 'ovh', mode: 'remote', profile: 'boss-bot', targetProfile: 'boss-bot' }
+    }
+  ]
+
+  const elevated = elevate(localRow, {
+    sources: [
+      { connectionId: 'local', kind: 'local' },
+      { connectionId: 'ovh', kind: 'remote' }
+    ],
+    roster
+  })
+
+  assert.equal(elevated.connectionId, 'ovh')
+  assert.deepEqual(JSON.parse(JSON.stringify(route(elevated))), {
+    connectionId: 'ovh',
+    mode: 'remote',
+    profile: 'boss-bot',
+    targetProfile: 'boss-bot'
+  })
 })
 
 test('merge: duplicate source and local identities render once', () => {
